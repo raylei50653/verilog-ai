@@ -1,0 +1,58 @@
+{
+  "axi4_lite": {
+    "signals": {
+      "awvalid": "output logic",
+      "awready": "input logic",
+      "awaddr": "output logic [ADDR_WIDTH-1:0]",
+      "awprot": "output logic [2:0]",
+      "wvalid": "output logic",
+      "wready": "input logic",
+      "wdata": "output logic [DATA_WIDTH-1:0]",
+      "wstrb": "output logic [DATA_WIDTH/8-1:0]",
+      "bvalid": "input logic",
+      "bready": "output logic",
+      "bresp": "input logic [1:0]",
+      "arvalid": "output logic",
+      "arready": "input logic",
+      "araddr": "output logic [ADDR_WIDTH-1:0]",
+      "arprot": "output logic [2:0]",
+      "rvalid": "input logic",
+      "rready": "output logic",
+      "rdata": "input logic [DATA_WIDTH-1:0]",
+      "rresp": "input logic [1:0]"
+    },
+    "parameters": ["DATA_WIDTH", "ADDR_WIDTH"],
+    "handshake": "valid-ready",
+    "channels": ["write_address", "write_data", "write_response", "read_address", "read_data"]
+  },
+  "apb": {
+    "signals": {
+      "psel": "output logic",
+      "penable": "output logic",
+      "paddr": "output logic [ADDR_WIDTH-1:0]",
+      "pwrite": "output logic",
+      "pwdata": "output logic [DATA_WIDTH-1:0]",
+      "pstrb": "output logic [DATA_WIDTH/8-1:0]",
+      "pready": "input logic",
+      "prdata": "input logic [DATA_WIDTH-1:0]",
+      "pslverr": "input logic"
+    },
+    "parameters": ["DATA_WIDTH", "ADDR_WIDTH"],
+    "handshake": "penable-pready"
+  },
+  "wishbone": {
+    "signals": {
+      "cyc": "output logic",
+      "stb": "output logic",
+      "we": "output logic",
+      "adr": "output logic [ADDR_WIDTH-1:0]",
+      "dat_mosi": "output logic [DATA_WIDTH-1:0]",
+      "sel": "output logic [DATA_WIDTH/8-1:0]",
+      "ack": "input logic",
+      "err": "input logic",
+      "dat_miso": "input logic [DATA_WIDTH-1:0]"
+    },
+    "parameters": ["DATA_WIDTH", "ADDR_WIDTH"],
+    "handshake": "stb-ack"
+  }
+}

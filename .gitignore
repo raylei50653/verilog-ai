@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Data
+data/cvdp_dataset/
+data/trials/
+data/optuna/
+data/outputs/
+
+# Results
+results/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+*.tar
+
+# pytest
+.pytest_cache/
