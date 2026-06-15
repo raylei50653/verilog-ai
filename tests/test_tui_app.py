@@ -216,3 +216,32 @@ def test_build_vivado_project_repair_fails_fallback(temp_trial_dir, tmp_path):
         assert proj_dir is not None
         assert "Failed to repair testbench after 3 attempts" in "".join(log.messages)
         assert "Warning: Testbench compilation failed under iverilog" in "".join(log.messages)
+
+def test_build_vivado_project_skip_tb(temp_trial_dir, tmp_path):
+    trial_id, out_dir = temp_trial_dir
+    log = MockRichLog()
+
+    with mock.patch.object(MCPServer, "get_trial_output_dir", return_value=out_dir), \
+         mock.patch.object(MCPServer, "_get_connection") as mock_conn, \
+         mock.patch("shutil.which", return_value="/usr/bin/iverilog"), \
+         mock.patch("subprocess.run") as mock_run, \
+         mock.patch("src.llm.create_backend") as mock_create_backend, \
+         mock.patch("os.getenv", return_value=str(tmp_path / "vivado_projects")):
+
+        # LLM backend should NOT be called at all
+        mock_backend = MagicMock()
+        mock_create_backend.return_value = mock_backend
+
+        # Run with skip_tb=True
+        app_instance = MagicMock()
+        proj_dir, rtl, tb, top, proj_name = VeriGenTUI._build_vivado_project(
+            app_instance, trial_id, "uut", "xc7a35tcpg236-1", log, skip_tb=True
+        )
+
+        assert proj_dir is not None
+        assert len(rtl) == 1
+        assert len(tb) == 0  # No testbench should be generated/returned
+        # LLM backend was not invoked
+        mock_backend.generate.assert_not_called()
+        # Subprocess.run (iverilog check) was not invoked
+        mock_run.assert_not_called()

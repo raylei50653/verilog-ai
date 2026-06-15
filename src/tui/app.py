@@ -368,6 +368,7 @@ class VeriGenTUI(App):
                         yield Input(value="", placeholder="auto-detect", id="vivado-top")
                         yield Label("Xilinx Part:", classes="field-label")
                         yield Input(value=os.getenv("VIVADO_PART", "xc7a35tcpg236-1"), id="vivado-part")
+                        yield Checkbox("Skip Testbench/Simulation", value=False, id="vivado-skip-tb")
                         with Horizontal(classes="btn-group"):
                             yield Button("Run Vivado", variant="success", id="btn-vivado")
                             yield Button("Stop", variant="error", id="btn-vivado-stop", disabled=True)
@@ -857,6 +858,7 @@ class VeriGenTUI(App):
         top_module: str | None,
         part: str,
         vivado_log: RichLog,
+        skip_tb: bool = False,
     ) -> tuple[Path | None, list[Path], list[Path], str | None, str | None]:
         """Prepare project dir, copy RTL+TB.
 
@@ -888,9 +890,11 @@ class VeriGenTUI(App):
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")
                 if "tb" in f.stem.lower() or "test" in f.stem.lower():
-                    tb_found.append(f)
+                    if not skip_tb:
+                        tb_found.append(f)
                 elif re.search(r'\bmodule\s+\w+\s*;', content):
-                    tb_found.append(f)
+                    if not skip_tb:
+                        tb_found.append(f)
                 else:
                     rtl_found.append(f)
             except Exception:
@@ -900,7 +904,7 @@ class VeriGenTUI(App):
             rtl_found = [f for f in found if f not in tb_found] or found
 
         if not top_module:
-            top_module = rtl_found[0].stem if rtl_found else tb_found[0].stem
+            top_module = rtl_found[0].stem if rtl_found else (tb_found[0].stem if tb_found else None)
 
         proj_base_env = os.getenv("VIVADO_PROJECT_DIR")
         if proj_base_env:
@@ -931,7 +935,7 @@ class VeriGenTUI(App):
             shutil.copy2(f, proj_dir / f.name)
 
         # Generate a dummy or AI-generated testbench if no testbench is found
-        if not tb_found:
+        if not tb_found and not skip_tb:
             tb_code = ""
             spec_prompt = ""
             generated_code = ""
@@ -1080,7 +1084,7 @@ endmodule
 
         # General testbench syntax check with iverilog (for both user-provided and final AI-generated)
         has_iverilog = shutil.which("iverilog") is not None
-        if has_iverilog and tb_found:
+        if has_iverilog and tb_found and not skip_tb:
             src_files = [str(proj_dir / f.name) for f in rtl_found] + [str(proj_dir / f.name) for f in tb_found]
             # Remove duplicate file paths
             src_files = list(dict.fromkeys(src_files))
@@ -1121,7 +1125,8 @@ endmodule
             return
 
         vivado_log.clear()
-        result = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+        skip_tb = self.query_one("#vivado-skip-tb", Checkbox).value
+        result = self._build_vivado_project(trial_id, top_module, part, vivado_log, skip_tb=skip_tb)
         proj_dir, rtl_found, tb_found, top_module, project_name = result
         if not proj_dir:
             vivado_status.update("[red]Failed to create project.[/red]")
@@ -1244,7 +1249,8 @@ endmodule
 
         if trial_id:
             vivado_log.clear()
-            result = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+            skip_tb = self.query_one("#vivado-skip-tb", Checkbox).value
+            result = self._build_vivado_project(trial_id, top_module, part, vivado_log, skip_tb=skip_tb)
             proj_dir, rtl_found, tb_found, top_module, project_name = result
             if not proj_dir:
                 return
