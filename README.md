@@ -41,6 +41,15 @@ Evaluated on the [CVDP benchmark](https://github.com/NVlabs/cvdp_benchmark) (783
 | GGUF model file | Code-capable model (e.g. DeepSeek-Coder-V2, Qwen3-Coder) |
 | ~20 GB free disk | Docker image ~5 GB + dataset ~2 GB |
 
+### Quick Start
+
+```bash
+git clone git@github.com:raylei50653/verilog-ai.git && \
+cd verilog-ai && \
+uv venv && uv sync && \
+docker build -f docker/Dockerfile.sim -t nvidia/cvdp-sim:v1.0.0 .
+```
+
 ### 0. Install system packages
 
 ```bash
