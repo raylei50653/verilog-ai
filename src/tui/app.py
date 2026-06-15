@@ -857,13 +857,14 @@ class VeriGenTUI(App):
         top_module: str | None,
         part: str,
         vivado_log: RichLog,
-    ) -> tuple[str | None, str | None]:
-        """Create project dir, copy RTL+TB, write open_project.tcl.
+    ) -> tuple[Path | None, list[Path], list[Path], str | None, str | None]:
+        """Prepare project dir, copy RTL+TB.
 
-        Returns (tcl_win_path, proj_dir_win) or (None, None) on failure.
+        Returns (proj_dir, rtl_found, tb_found, top_module, project_name) or (None, ...) on failure.
         """
         import shutil
-        from src.agents.vivado_ppa import _to_win_path, _is_wsl, _win_temp_base
+        import re
+        from src.agents.vivado_ppa import _is_wsl, _win_temp_base
         from src.mcp.server import MCPServer
 
         wsl_mode = _is_wsl()
@@ -871,16 +872,32 @@ class VeriGenTUI(App):
         out_dir = MCPServer().get_trial_output_dir(trial_id)
         if not out_dir.exists():
             vivado_log.write(f"[red]Trial not found: {out_dir}[/red]")
-            return None, None
+            return None, [], [], None, None
 
         found = list(out_dir.rglob("*.sv")) + list(out_dir.rglob("*.v"))
-        tb_found  = [f for f in found if "tb" in f.stem.lower() or "test" in f.stem.lower()]
-        rtl_found = [f for f in found if f not in tb_found] or found
-        extra_files = [f for f in out_dir.rglob("*") if f.is_file() and f.suffix not in (".sv", ".v")]
-
         if not found:
             vivado_log.write(f"[red]No .sv/.v files found under {out_dir}[/red]")
-            return None, None
+            return None, [], [], None, None
+
+        # Smart detection of testbenches:
+        # 1. Filename contains "tb" or "test"
+        # 2. Or the file contains a module declaration without ports (e.g., module tb;)
+        tb_found = []
+        rtl_found = []
+        for f in found:
+            try:
+                content = f.read_text(encoding="utf-8", errors="replace")
+                if "tb" in f.stem.lower() or "test" in f.stem.lower():
+                    tb_found.append(f)
+                elif re.search(r'\bmodule\s+\w+\s*;', content):
+                    tb_found.append(f)
+                else:
+                    rtl_found.append(f)
+            except Exception:
+                rtl_found.append(f)
+
+        if not rtl_found:
+            rtl_found = [f for f in found if f not in tb_found] or found
 
         if not top_module:
             top_module = rtl_found[0].stem if rtl_found else tb_found[0].stem
@@ -894,44 +911,121 @@ class VeriGenTUI(App):
             import tempfile
             proj_base = Path(tempfile.gettempdir())
 
-        proj_dir = proj_base / f"verigen_{trial_id[:12]}"
+        project_name = f"verigen_{trial_id[:12]}"
+        proj_dir = proj_base / project_name
+
+        if proj_dir.exists():
+            for child in list(proj_dir.iterdir()):
+                try:
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        child.unlink()
+                except Exception:
+                    pass
+
         proj_dir.mkdir(parents=True, exist_ok=True)
 
+        extra_files = [f for f in out_dir.rglob("*") if f.is_file() and f.suffix not in (".sv", ".v")]
         for f in rtl_found + tb_found + extra_files:
             shutil.copy2(f, proj_dir / f.name)
 
-        def win(f: Path) -> str:
-            return _to_win_path(f) if wsl_mode else str(f)
+        # Generate a dummy or AI-generated testbench if no testbench is found
+        if not tb_found:
+            tb_code = ""
+            spec_prompt = ""
+            generated_code = ""
+            try:
+                with MCPServer()._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "SELECT spec_prompt, generated_code FROM trials WHERE trial_id = ?",
+                        (trial_id,),
+                    )
+                    row = cursor.fetchone()
+                    if row:
+                        spec_prompt = row["spec_prompt"] or ""
+                        generated_code = row["generated_code"] or ""
+            except Exception:
+                pass
 
-        proj_dir_win = win(proj_dir)
-        rtl_win = [win(proj_dir / f.name) for f in rtl_found]
-        tb_win  = [win(proj_dir / f.name) for f in tb_found]
+            if spec_prompt and generated_code:
+                try:
+                    vivado_log.write("[dim]AI is generating a customized SystemVerilog testbench for this design...[/dim]")
+                    from src.llm import create_backend
+                    backend = create_backend()
+                    system_prompt = (
+                        "You are a skilled digital design engineer specializing in SystemVerilog testbenches.\n"
+                        "Your task is to write a self-checking SystemVerilog testbench for the provided design.\n"
+                        "Generate only valid SystemVerilog code, wrapped in a markdown block starting with ```systemverilog and ending with ```.\n"
+                        "Include no conversational text outside the code block."
+                    )
+                    user_prompt = (
+                        f"Here is the specification of the design:\n"
+                        f"```\n{spec_prompt}\n```\n\n"
+                        f"Here is the generated Verilog/SystemVerilog RTL code of the design:\n"
+                        f"```systemverilog\n{generated_code}\n```\n\n"
+                        f"Please write a self-checking SystemVerilog testbench module named `tb` that instantiates this design, "
+                        f"drives the inputs (including generating a clock and a reset), and performs basic sanity checks or simulation stimulus.\n"
+                        f"Ensure the testbench ends with `$finish;` so it terminates. Output the SystemVerilog code inside a ```systemverilog code block."
+                    )
+                    response = backend.generate(
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        temperature=0.2,
+                        max_tokens=4096,
+                    )
+                    content = response.text
+                    code_blocks = re.findall(r"```(?:systemverilog|verilog)?\s*(.*?)\s*```", content, re.DOTALL)
+                    tb_code = code_blocks[0].strip() if code_blocks else content.strip()
+                except Exception as e:
+                    vivado_log.write(f"[yellow]Failed to generate testbench using AI: {e}. Falling back to default template.[/yellow]")
 
-        rtl_cmds = "\n".join(f"add_files -norecurse {{{s}}}" for s in rtl_win)
-        tb_cmds  = "\n".join(f"add_files -norecurse -fileset sim_1 {{{s}}}" for s in tb_win)
-        tcl_content = (
-            f"create_project {trial_id[:12]} {{{proj_dir_win}}} -part {part} -force\n"
-            + (f"{rtl_cmds}\n" if rtl_cmds else "")
-            + (f"{tb_cmds}\n" if tb_cmds else "")
-            + f"set_property top {top_module} [current_fileset]\n"
-            + f"update_compile_order -fileset sources_1\n"
-            + (f"current_fileset [get_filesets sim_1]\n"
-               f"set_property top {tb_found[0].stem} [current_fileset]\n"
-               f"update_compile_order -fileset sim_1\n" if tb_found else "")
-        )
-        tcl_wsl = proj_dir / "open_project.tcl"
-        tcl_wsl.write_text(tcl_content, encoding="utf-8")
-        tcl_win = _to_win_path(tcl_wsl) if wsl_mode else str(tcl_wsl)
+            if not tb_code:
+                tb_code = f"""`timescale 1ns / 1ps
 
-        vivado_log.write(f"Project: {proj_dir_win}")
+module tb;
+    reg clk;
+    reg rst_n;
+
+    // Instantiate Unit Under Test (UUT)
+    // Please update the port connections below to match your top module:
+    /*
+    {top_module} uut (
+        .clk(clk),
+        .rst_n(rst_n)
+    );
+    */
+
+    always #5 clk = ~clk;
+
+    initial begin
+        clk = 0;
+        rst_n = 0;
+        #20;
+        rst_n = 1;
+        #100;
+        $finish;
+    end
+endmodule
+"""
+            tb_code = tb_code.encode("ascii", errors="ignore").decode("ascii")
+            dummy_tb_path = proj_dir / "tb.sv"
+            dummy_tb_path.write_text(tb_code, encoding="ascii")
+            tb_found = [dummy_tb_path]
+
+        vivado_log.write(f"Project: {proj_dir}")
         if rtl_found:
             vivado_log.write(f"RTL:     {[f.name for f in rtl_found]}")
         if tb_found:
             vivado_log.write(f"TB:      {[f.name for f in tb_found]}")
 
-        return tcl_win, proj_dir_win
+        return proj_dir, rtl_found, tb_found, top_module, project_name
 
     def _make_vivado_project(self) -> None:
+        import shutil
+        from src.agents.vivado_ppa import _to_win_path, _is_wsl
+
         vivado_log    = self.query_one("#vivado-log", RichLog)
         vivado_status = self.query_one("#vivado-status", Label)
         trial_id   = self.query_one("#vivado-trial-id", Input).value.strip()
@@ -944,12 +1038,70 @@ class VeriGenTUI(App):
             return
 
         vivado_log.clear()
-        tcl_win, proj_dir_win = self._build_vivado_project(trial_id, top_module, part, vivado_log)
-        if tcl_win:
-            vivado_status.update("Project ready.")
-            vivado_log.write(f"[green]Project: {proj_dir_win}[/green]")
-        else:
+        result = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+        proj_dir, rtl_found, tb_found, top_module, project_name = result
+        if not proj_dir:
             vivado_status.update("[red]Failed to create project.[/red]")
+            return
+
+        wsl_mode = _is_wsl()
+        def win(f: Path) -> str:
+            return _to_win_path(f) if wsl_mode else str(f)
+
+        proj_dir_win = win(proj_dir)
+        rtl_win = [win(proj_dir / f.name) for f in rtl_found]
+        tb_win  = [win(proj_dir / f.name) for f in tb_found]
+
+        rtl_cmds = "\n".join(f"add_files -norecurse -fileset sources_1 {{{s}}}" for s in rtl_win)
+        tb_cmds  = "\n".join(f"add_files -norecurse -fileset sim_1 {{{s}}}" for s in tb_win)
+        tcl_content = (
+            f"create_project {project_name} {{{proj_dir_win}}} -part {part} -force\n"
+            + (f"{rtl_cmds}\n" if rtl_cmds else "")
+            + (f"{tb_cmds}\n" if tb_cmds else "")
+            + f"set_property top {top_module} [current_fileset]\n"
+            + f"update_compile_order -fileset sources_1\n"
+            + (f"set_property top {tb_found[0].stem} [get_filesets sim_1]\n"
+               f"update_compile_order -fileset sim_1\n"
+               f"launch_simulation\n" if tb_found else "")
+            + "close_project\n"
+        )
+        tcl_content = tcl_content.encode("ascii", errors="ignore").decode("ascii")
+        tcl_path = proj_dir / "create_project.tcl"
+        tcl_path.write_text(tcl_content, encoding="ascii")
+        tcl_win = _to_win_path(tcl_path) if wsl_mode else str(tcl_path)
+
+        import subprocess as _sp
+        from src.agents.vivado_ppa import find_vivado_wsl, _build_cmd
+        vbin = os.getenv("VIVADO_BIN") or find_vivado_wsl() or "vivado"
+        if vbin == "vivado":
+            vivado_status.update("[yellow]Vivado not found, TCL only.[/yellow]")
+            vivado_log.write("[yellow]Set VIVADO_BIN in .env to auto-create project structure.[/yellow]")
+            vivado_log.write(f"[green]TCL: {tcl_win}[/green]")
+            return
+
+        vivado_status.update("Creating Vivado project...")
+        vivado_log.write("[dim]Running vivado -mode batch...[/dim]")
+        try:
+            cmd = _build_cmd(vbin, tcl_win, wsl_mode)
+            proc = _sp.run(
+                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+            )
+            if proc.returncode == 0:
+                vivado_status.update("Project ready.")
+                vivado_log.write(f"[green]Project created: {proj_dir_win}[/green]")
+                vivado_log.write(f"[green]  {project_name}.xpr[/green]")
+                vivado_log.write(f"[green]  {project_name}.srcs/sources_1/imports/[/green]")
+                if tb_found:
+                    vivado_log.write(f"[green]  {project_name}.srcs/sim_1/imports/[/green]")
+            else:
+                vivado_status.update("[red]Vivado batch failed.[/red]")
+                vivado_log.write(f"[red]{proc.stderr[:1000]}[/red]")
+        except _sp.TimeoutExpired:
+            vivado_status.update("[red]Vivado timed out.[/red]")
+            vivado_log.write("[red]Vivado batch timed out (120s)[/red]")
+        except FileNotFoundError:
+            vivado_status.update("[red]Vivado not found.[/red]")
+            vivado_log.write(f"[red]Binary not found: {vbin}[/red]")
 
     def _launch_vivado_with_tcl(self, tcl_win: str | None = None) -> None:
         import subprocess
@@ -983,14 +1135,47 @@ class VeriGenTUI(App):
             vivado_log.write(f"[red]Error: {e}[/red]")
 
     def _launch_vivado_gui(self) -> None:
+        import subprocess
+        from src.agents.vivado_ppa import find_vivado_wsl, _to_win_path, _is_wsl
+
         vivado_log    = self.query_one("#vivado-log", RichLog)
+        vivado_status = self.query_one("#vivado-status", Label)
         trial_id   = self.query_one("#vivado-trial-id", Input).value.strip()
         top_module = self.query_one("#vivado-top",  Input).value.strip() or None
         part       = self.query_one("#vivado-part", Input).value.strip() or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
 
         if trial_id:
             vivado_log.clear()
-            tcl_win, _ = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+            result = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+            proj_dir, rtl_found, tb_found, top_module, project_name = result
+            if not proj_dir:
+                return
+
+            wsl_mode = _is_wsl()
+            def win(f: Path) -> str:
+                return _to_win_path(f) if wsl_mode else str(f)
+
+            proj_dir_win = win(proj_dir)
+            rtl_win = [win(proj_dir / f.name) for f in rtl_found]
+            tb_win  = [win(proj_dir / f.name) for f in tb_found]
+
+            rtl_cmds = "\n".join(f"add_files -norecurse -fileset sources_1 {{{s}}}" for s in rtl_win)
+            tb_cmds  = "\n".join(f"add_files -norecurse -fileset sim_1 {{{s}}}" for s in tb_win)
+            tcl_content = (
+                f"create_project {project_name} {{{proj_dir_win}}} -part {part} -force\n"
+                + (f"{rtl_cmds}\n" if rtl_cmds else "")
+                + (f"{tb_cmds}\n" if tb_cmds else "")
+                + f"set_property top {top_module} [current_fileset]\n"
+                + f"update_compile_order -fileset sources_1\n"
+                + (f"set_property top {tb_found[0].stem} [get_filesets sim_1]\n"
+                   f"update_compile_order -fileset sim_1\n"
+                   f"launch_simulation\n" if tb_found else "")
+            )
+            tcl_content = tcl_content.encode("ascii", errors="ignore").decode("ascii")
+            tcl_path = proj_dir / "open_project.tcl"
+            tcl_path.write_text(tcl_content, encoding="ascii")
+            tcl_win = _to_win_path(tcl_path) if wsl_mode else str(tcl_path)
+
             self._launch_vivado_with_tcl(tcl_win)
         else:
             self._launch_vivado_with_tcl()
