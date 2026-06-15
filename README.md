@@ -1,6 +1,6 @@
 # VeriGen
 
-LLM-based Verilog RTL generator powered by llama-server, with multi-agent verification, Yosys synthesis, and optional Vivado analysis.
+LLM-based Verilog RTL generator powered by llama-server, with multi-agent verification and optional Vivado synthesis analysis.
 
 ## Approach
 
@@ -8,8 +8,8 @@ LLM-based Verilog RTL generator powered by llama-server, with multi-agent verifi
 Spec → LLM (generate RTL) → Sub-Agent Pipeline → Result
          ↕ query/write          ├─ Syntax check (iverilog)
       MCP Server                ├─ Simulation (Verilator + cocotb)
-  (constraints, interfaces,     ├─ PPA analysis (Yosys + abc)
-   trial history in SQLite)     └─ Vivado analysis (optional)
+  (constraints, interfaces,     └─ Vivado analysis (optional)
+   trial history in SQLite)
 ```
 
 Evaluated on the [CVDP benchmark](https://github.com/NVlabs/cvdp_benchmark) (783 real-world Verilog design problems).
@@ -24,7 +24,6 @@ Evaluated on the [CVDP benchmark](https://github.com/NVlabs/cvdp_benchmark) (783
 | TUI | Textual + Rich |
 | Data validation | Pydantic |
 | Verification (Docker) | Icarus Verilog, Verilator, cocotb |
-| Synthesis (Docker) | Yosys + abc |
 | Synthesis (optional) | Vivado |
 | Dataset | HuggingFace `datasets` (CVDP benchmark) |
 | Storage | SQLite3 |
@@ -83,7 +82,6 @@ Verify tools:
 
 ```bash
 docker run --rm nvidia/cvdp-sim:v1.0.0 iverilog -V
-docker run --rm nvidia/cvdp-sim:v1.0.0 yosys -V
 docker run --rm nvidia/cvdp-sim:v1.0.0 verilator --version
 ```
 
