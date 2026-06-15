@@ -1054,14 +1054,15 @@ endmodule
 
         rtl_cmds = "\n".join(f"add_files -norecurse -fileset sources_1 {{{s}}}" for s in rtl_win)
         tb_cmds  = "\n".join(f"add_files -norecurse -fileset sim_1 {{{s}}}" for s in tb_win)
+        user_top = self.query_one("#vivado-top",  Input).value.strip()
+        top_cmd = f"set_property top {user_top} [current_fileset]\n" if user_top else ""
         tcl_content = (
             f"create_project {project_name} {{{proj_dir_win}}} -part {part} -force\n"
             + (f"{rtl_cmds}\n" if rtl_cmds else "")
             + (f"{tb_cmds}\n" if tb_cmds else "")
-            + f"set_property top {top_module} [current_fileset]\n"
+            + top_cmd
             + f"update_compile_order -fileset sources_1\n"
-            + (f"set_property top {tb_found[0].stem} [get_filesets sim_1]\n"
-               f"update_compile_order -fileset sim_1\n"
+            + (f"update_compile_order -fileset sim_1\n"
                f"launch_simulation\n" if tb_found else "")
             + "close_project\n"
         )
@@ -1175,14 +1176,15 @@ endmodule
 
             rtl_cmds = "\n".join(f"add_files -norecurse -fileset sources_1 {{{s}}}" for s in rtl_win)
             tb_cmds  = "\n".join(f"add_files -norecurse -fileset sim_1 {{{s}}}" for s in tb_win)
+            user_top = self.query_one("#vivado-top",  Input).value.strip()
+            top_cmd = f"set_property top {user_top} [current_fileset]\n" if user_top else ""
             tcl_content = (
                 f"create_project {project_name} {{{proj_dir_win}}} -part {part} -force\n"
                 + (f"{rtl_cmds}\n" if rtl_cmds else "")
                 + (f"{tb_cmds}\n" if tb_cmds else "")
-                + f"set_property top {top_module} [current_fileset]\n"
+                + top_cmd
                 + f"update_compile_order -fileset sources_1\n"
-                + (f"set_property top {tb_found[0].stem} [get_filesets sim_1]\n"
-                   f"update_compile_order -fileset sim_1\n"
+                + (f"update_compile_order -fileset sim_1\n"
                    f"launch_simulation\n" if tb_found else "")
             )
             tcl_content = tcl_content.encode("ascii", errors="ignore").decode("ascii")
