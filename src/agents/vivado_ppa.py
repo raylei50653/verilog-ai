@@ -242,11 +242,23 @@ report_power -file {{{power_rpt}}}
             try:
                 result = subprocess.run(
                     cmd,
-                    capture_output=True, text=True,
-                    encoding="utf-8", errors="replace",
+                    capture_output=True, text=False,
                     timeout=timeout,
                     cwd=str(tmppath),
                 )
+                # Smart decode function for local Chinese encoding (CP950/GBK)
+                def decode_bytes(data: bytes) -> str:
+                    if not data:
+                        return ""
+                    for enc in ("utf-8", "cp950", "gbk"):
+                        try:
+                            return data.decode(enc)
+                        except UnicodeDecodeError:
+                            continue
+                    return data.decode("utf-8", errors="replace")
+
+                stdout_str = decode_bytes(result.stdout)
+                stderr_str = decode_bytes(result.stderr)
             except subprocess.TimeoutExpired:
                 return AgentResult(
                     pass_=False,
@@ -265,8 +277,8 @@ report_power -file {{{power_rpt}}}
             if result.returncode != 0:
                 return AgentResult(
                     pass_=False,
-                    errors=[{"message": result.stderr.strip() or result.stdout[-2000:]}],
-                    raw_output=result.stdout,
+                    errors=[{"message": stderr_str.strip() or stdout_str[-2000:]}],
+                    raw_output=stdout_str,
                     duration_ms=elapsed,
                 )
 
@@ -286,6 +298,6 @@ report_power -file {{{power_rpt}}}
         return AgentResult(
             pass_=True,
             metrics=metrics,
-            raw_output=result.stdout if result else "",
+            raw_output=stdout_str if result else "",
             duration_ms=(time.monotonic() - start) * 1000,
         )

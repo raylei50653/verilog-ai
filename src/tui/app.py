@@ -1084,8 +1084,22 @@ endmodule
         try:
             cmd = _build_cmd(vbin, tcl_win, wsl_mode)
             proc = _sp.run(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120,
+                cmd, capture_output=True, text=False, timeout=120,
             )
+            # Smart decode function for local Chinese encoding (CP950/GBK)
+            def decode_bytes(data: bytes) -> str:
+                if not data:
+                    return ""
+                for enc in ("utf-8", "cp950", "gbk"):
+                    try:
+                        return data.decode(enc)
+                    except UnicodeDecodeError:
+                        continue
+                return data.decode("utf-8", errors="replace")
+
+            stdout_str = decode_bytes(proc.stdout)
+            stderr_str = decode_bytes(proc.stderr)
+
             if proc.returncode == 0:
                 vivado_status.update("Project ready.")
                 vivado_log.write(f"[green]Project created: {proj_dir_win}[/green]")
@@ -1095,7 +1109,7 @@ endmodule
                     vivado_log.write(f"[green]  {project_name}.srcs/sim_1/imports/[/green]")
             else:
                 vivado_status.update("[red]Vivado batch failed.[/red]")
-                vivado_log.write(f"[red]{proc.stderr[:1000]}[/red]")
+                vivado_log.write(f"[red]{stderr_str[:1000]}[/red]")
         except _sp.TimeoutExpired:
             vivado_status.update("[red]Vivado timed out.[/red]")
             vivado_log.write("[red]Vivado batch timed out (120s)[/red]")
