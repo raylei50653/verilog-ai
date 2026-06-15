@@ -10,6 +10,7 @@ class AgentResult:
     metrics: dict = field(default_factory=dict)
     raw_output: str = ""
     duration_ms: float = 0.0
+    is_infra_failure: bool = False
 
 
 class SubAgent(ABC):

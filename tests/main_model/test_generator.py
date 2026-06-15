@@ -51,8 +51,21 @@ endmodule
     def test_fix_errors(self, mock_backend):
         gen = ModelGenerator(mock_backend)
         errors = [{"line": 5, "message": "syntax error: unexpected ';'"}]
-        code, _ = gen.fix_errors("counter", "module bad(); enmodule", errors)
+        diagnosis_report = (
+            "TODO 1\n"
+            "LOCATION: line 5\n"
+            "SNIPPET: `endmodule`\n"
+            "BUG: syntax error near module terminator\n"
+            "FIX: replace the malformed terminator with a valid endmodule\n"
+            "REVIEW: verify the parser accepts the module terminator\n"
+        )
+        code, _ = gen.fix_errors("counter", "module bad(); enmodule", errors, diagnosis_report=diagnosis_report)
         assert "module counter" in code
+
+        call_kwargs = mock_backend.generate.call_args.kwargs
+        assert "debug" in call_kwargs["system_prompt"].lower()
+        assert "TODO 1" in call_kwargs["user_prompt"]
+        assert "tools" not in call_kwargs
 
     def test_extract_verilog_from_code_block(self, mock_backend):
         gen = ModelGenerator(mock_backend)

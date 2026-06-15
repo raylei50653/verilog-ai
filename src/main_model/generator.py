@@ -1,6 +1,7 @@
 import re
 from typing import Callable, Any
-from src.llm import LLMBackend, LLMResponse
+from src.llm import LLMBackend, LLMResponse, build_fix_tools, _local_storage
+from src.cancellation import CancellationToken
 
 
 class ModelGenerator:
@@ -15,31 +16,29 @@ class ModelGenerator:
         constraints: dict | None = None,
         interface_specs: dict | None = None,
         examples: list[dict] | None = None,
+        testbench_files: dict[str, str] | None = None,
         temperature: float = 0.2,
         max_tokens: int = 4096,
         enable_thinking: bool = False,
         on_token: Callable[[str], None] | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> tuple[str, LLMResponse]:
         if system_message is None:
             system_message = (
-                "[DESIGN CONTRACT]\n"
-                "ROLE: Expert Verilog/SystemVerilog RTL Design Engineer\n"
-                "OBJECTIVE: Generate high-quality, synthesizable, and robust RTL code based on Client Spec.\n\n"
-                "1. PRE-CONDITIONS:\n"
-                "   - Client Spec, Parameters, and Constraints are provided in the prompt.\n\n"
-                "2. HARD DESIGN INVARIANTS (TECHNICAL CONSTRAINTS):\n"
-                "   - Synthesizability: Use standard synthesizable constructs only. No #delays, initial blocks, or Specify blocks.\n"
-                "   - Register Initialization: All sequential registers MUST be initialized inside a reset block.\n"
-                "   - Declarations: All ports, wires, registers, and internal variables must be declared explicitly.\n"
-                "   - Port Matching: Port names, directions, and parameters must match the specification exactly.\n\n"
-                "3. POST-CONDITIONS (OUTPUT PROTOCOL):\n"
-                "   - Code Wrap: Output the complete Verilog code inside a single ```verilog ... ``` block.\n"
-                "   - Zero Conversational Text: Do not output any explanation, commentary, greetings, or markdown outside the code block.\n"
-                "[/DESIGN CONTRACT]"
+                "Expert Verilog/SystemVerilog RTL designer. Rules:\n"
+                "- Reset: active-high `if (rst)`. Sync by default (`always_ff @(posedge clk)`); async only if spec says so (`always_ff @(posedge clk or posedge rst)`). Init all regs in reset.\n"
+                "- No self-assignment (`reg <= reg`). No `===`/`!==` (use `==`/`!=`). No `#delays`, `initial`, or `specify`.\n"
+                "- Every `if` needs `else` or a prior default; every `case` needs `default`.\n"
+                "- Single-driver: one always block per signal. Multi-clock: each domain's sync chain gets distinct signal names.\n"
+                "- `=` in `always_comb`, `<=` in `always_ff`. Never mix.\n"
+                "- FSM (only if spec has state): two blocks — clocked (state reg + registered outputs), combinational (next-state + combinational outputs). Comb block drives only `next_state` and combinational outputs; datapath regs go in the clocked block.\n"
+                "- No added regs or pipeline stages the spec doesn't require. Combinational outputs use `assign` or `always_comb`.\n"
+                "- `.sv` files: `logic`, `always_ff`, `always_comb`. All signals declared at module level. Ports match spec exactly.\n"
+                "- No comments. Output: one ```verilog ... ``` block, nothing else."
             )
 
         user_prompt = self._build_prompt(
-            spec, params, constraints, interface_specs, examples
+            spec, params, constraints, interface_specs, examples, testbench_files
         )
 
         if enable_thinking and hasattr(self.backend, "generate_with_thinking"):
@@ -49,6 +48,7 @@ class ModelGenerator:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_token=on_token,
+                cancel_token=cancel_token,
             )
         else:
             response = self.backend.generate(
@@ -57,6 +57,7 @@ class ModelGenerator:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_token=on_token,
+                cancel_token=cancel_token,
             )
 
         code = self._extract_verilog(response.text)
@@ -68,24 +69,30 @@ class ModelGenerator:
         current_code: str,
         errors: list[dict],
         diagnosis_report: str | None = None,
+        source_context: list[dict] | None = None,
+        testbench_context: list[dict] | None = None,
         temperature: float = 0.2,
         max_tokens: int = 16384,
         enable_thinking: bool = False,
         on_token: Callable[[str], None] | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> tuple[str, "LLMResponse"]:
         system_message = (
-            "[DEBUGGING CONTRACT]\n"
-            "ROLE: Expert Verilog RTL Debug and Rectification Engineer\n"
-            "OBJECTIVE: Analyze compile/simulation errors and apply precise bug fixes.\n\n"
-            "1. PRE-CONDITIONS:\n"
-            "   - Buggy Verilog code, compiler/simulation error list, and Sub-Agent TODO List are provided.\n\n"
-            "2. HARD DEBUGGING INVARIANTS:\n"
-            "   - Regression Prevention: Fix identified bugs while preserving all other correct logic and interface specs.\n"
-            "   - Synthesizability: The corrected module must remain strictly synthesizable and compile-ready.\n\n"
-            "3. POST-CONDITIONS (OUTPUT PROTOCOL):\n"
-            "   - Code Wrap: Output the fully corrected Verilog code inside a single ```verilog ... ``` block.\n"
-            "   - Zero Conversational Text: Do not write any explanations, change-logs, or chat outside the code block.\n"
-            "[/DEBUGGING CONTRACT]"
+            "You are an expert Verilog RTL debug engineer. Apply the minimal fixes needed to resolve the TODOs below.\n\n"
+            "Rules:\n"
+            "- For each TODO: first locate the exact LOCATION and SNIPPET in the code, read the surrounding context (at least 5 lines above and below), then apply the fix. Never patch a line you haven't read.\n"
+            "- Fix each TODO in order using the smallest targeted change. Do not rewrite unrelated logic.\n"
+            "- Preserve the original reset style (sync vs async) unless a TODO explicitly requires changing it.\n"
+            "- Active-high reset: `if (rst)`. Correct any `if (!rst)` or `if (~rst)` you encounter.\n"
+            "- Eliminate self-assignment patterns (`X <= X`).\n"
+            "- Ensure every `if`/`else if`/`else` chain is syntactically closed.\n"
+            "- Single-driver: if two always blocks drive the same signal, merge them into one.\n"
+            "- No `<=` inside `always @(*)` or `always_comb`. Move register updates to the clocked block.\n"
+            "- FSM canonical form: state register and registered outputs in one clocked block; next-state decode and combinational outputs in one combinational block.\n"
+            "- Skip any TODO that describes a test runner, pytest, or simulation infrastructure error — output the current code unchanged for that item.\n"
+            "- The corrected module must remain strictly synthesizable.\n"
+            "- If your fix introduces any new signal, wire, or variable, declare it at the top of the module before use.\n\n"
+            "Output: one ```verilog ... ``` block containing the complete corrected module. No explanations, no change log."
         )
 
         error_text = "\n".join(
@@ -103,19 +110,43 @@ class ModelGenerator:
                 f"## Sub-Agent Diagnosis TODO List:\n"
                 f"{diagnosis_report}\n\n"
             )
+        if source_context:
+            user_prompt += "## Error Source Context:\n"
+            for ctx in source_context:
+                user_prompt += (
+                    f"File: {ctx.get('path')}\n"
+                    f"Error line: {ctx.get('error_line')}\n"
+                    f"Message: {ctx.get('message')}\n"
+                    "```text\n"
+                )
+                for line in ctx.get("excerpt", []):
+                    user_prompt += f"{line['line']:>4}: {line['text']}\n"
+                user_prompt += "```\n\n"
+        if testbench_context:
+            user_prompt += "## Testbench Context:\n"
+            for ctx in testbench_context:
+                user_prompt += (
+                    f"File: {ctx.get('path')}\n"
+                    f"Focus line: {ctx.get('focus_line')}\n"
+                    "```text\n"
+                )
+                for line in ctx.get("excerpt", []):
+                    user_prompt += f"{line['line']:>4}: {line['text']}\n"
+                user_prompt += "```\n\n"
         user_prompt += (
             f"Original specification: {original_spec}\n\n"
-            f"Please carefully address each TODO item in the Sub-Agent TODO List one by one. "
-            f"Ensure all identified bugs are fixed, while keeping other correct logic unchanged, and output the fully corrected Verilog code."
+            "Fix all identified bugs while keeping other correct logic unchanged.\n"
+            "Output the complete corrected Verilog module."
         )
 
-        if hasattr(self.backend, 'generate_with_thinking'):
+        if enable_thinking and hasattr(self.backend, "generate_with_thinking"):
             response = self.backend.generate_with_thinking(
                 system_prompt=system_message,
                 user_prompt=user_prompt,
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_token=on_token,
+                cancel_token=cancel_token,
             )
         else:
             response = self.backend.generate(
@@ -124,10 +155,11 @@ class ModelGenerator:
                 temperature=temperature,
                 max_tokens=max_tokens,
                 on_token=on_token,
+                cancel_token=cancel_token,
             )
 
         code = self._extract_verilog(response.text)
-        return code, response
+        return code or current_code, response
 
     def _build_prompt(
         self,
@@ -136,6 +168,7 @@ class ModelGenerator:
         constraints: dict | None,
         interface_specs: dict | None,
         examples: list[dict] | None,
+        testbench_files: dict[str, str] | None = None,
     ) -> str:
         parts: list[str] = []
 
@@ -170,6 +203,14 @@ class ModelGenerator:
         parts.append("## Specification\n")
         parts.append(spec)
         parts.append("")
+
+        if testbench_files:
+            parts.append("## Testbench (read-only — use this to understand expected port names, signal types, and behavior):\n")
+            for tb_name, tb_content in testbench_files.items():
+                parts.append(f"### {tb_name}")
+                parts.append(f"```verilog\n{tb_content}\n```")
+            parts.append("")
+
         parts.append("Generate the complete Verilog RTL module based on the specification above.")
 
         return "\n".join(parts)

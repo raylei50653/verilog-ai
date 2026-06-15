@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ class TrialRecord(BaseModel):
     simulation_pass: bool
     simulation_failures: list[str] = []
     ppa_score: dict[str, Any] | None = None
+    vivado_metrics: dict[str, Any] | None = None
     pass_: bool = False
     retry_count: int = 0
     duration_ms: float = 0.0
@@ -36,6 +38,257 @@ class MCPServer:
 
         self._constraints: dict[str, Any] = {}
         self._interfaces: dict[str, Any] = {}
+
+    def get_trial_output_dir(self, trial_id: str) -> Path:
+        out_dir = self.db_path.parent.parent / "outputs" / trial_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        return out_dir
+
+    def get_trial_todo_path(self, trial_id: str) -> Path:
+        return self.get_trial_output_dir(trial_id) / "todos.json"
+
+    def write_trial_source(self, trial_id: str, filename: str, content: str) -> Path:
+        out_dir = self.get_trial_output_dir(trial_id)
+        file_path = out_dir / filename
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text(content)
+        return file_path
+
+    def read_file_lines(
+        self,
+        file_path: str | Path,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> dict[str, Any]:
+        path = Path(file_path)
+        lines = path.read_text().splitlines()
+        start = max((start_line or 1), 1)
+        end = min(end_line or len(lines), len(lines))
+        excerpt = [
+            {"line": line_no, "text": lines[line_no - 1]}
+            for line_no in range(start, end + 1)
+        ]
+        return {
+            "path": str(path),
+            "start_line": start,
+            "end_line": end,
+            "lines": excerpt,
+        }
+
+    def get_error_source_context(
+        self,
+        file_path: str | Path,
+        errors: list[dict[str, Any]],
+        context_radius: int = 2,
+    ) -> list[dict[str, Any]]:
+        contexts: list[dict[str, Any]] = []
+        for error in errors:
+            line_no = error.get("line")
+            if not isinstance(line_no, int) or line_no < 1:
+                continue
+            excerpt = self.read_file_lines(
+                file_path,
+                start_line=max(1, line_no - context_radius),
+                end_line=line_no + context_radius,
+            )
+            contexts.append(
+                {
+                    "path": excerpt["path"],
+                    "error_line": line_no,
+                    "message": error.get("message", str(error)),
+                    "excerpt": excerpt["lines"],
+                }
+            )
+        return contexts
+
+    def get_testbench_context(
+        self,
+        file_paths: list[str | Path],
+        *,
+        context_radius: int = 2,
+        max_matches_per_file: int = 4,
+    ) -> list[dict[str, Any]]:
+        keywords = ("assert", "expect", "expected", "posedge", "negedge", "reset", "clk", "dut")
+        contexts: list[dict[str, Any]] = []
+
+        for file_path in file_paths:
+            path = Path(file_path)
+            lines = path.read_text().splitlines()
+            matches: list[int] = []
+
+            for idx, line in enumerate(lines, start=1):
+                lower = line.lower()
+                if any(keyword in lower for keyword in keywords):
+                    matches.append(idx)
+                if len(matches) >= max_matches_per_file:
+                    break
+
+            if not matches and lines:
+                matches = [1]
+
+            for line_no in matches:
+                excerpt = self.read_file_lines(
+                    path,
+                    start_line=max(1, line_no - context_radius),
+                    end_line=min(len(lines), line_no + context_radius),
+                )
+                contexts.append(
+                    {
+                        "path": str(path),
+                        "focus_line": line_no,
+                        "excerpt": excerpt["lines"],
+                    }
+                )
+        return contexts
+
+    def parse_todo_report(self, diagnosis_report: str) -> list[dict[str, Any]]:
+        todos: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+
+        for idx, raw_line in enumerate(diagnosis_report.splitlines(), start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            todo_match = re.match(r"^TODO\s+(\d+)\s*$", line, re.IGNORECASE)
+            if todo_match:
+                if current is not None:
+                    todos.append(current)
+                todo_num = todo_match.group(1)
+                current = {
+                    "id": f"todo-{todo_num}",
+                    "order": len(todos) + 1,
+                    "status": "pending",
+                    "location": {"raw": "", "line_start": None, "line_end": None},
+                    "snippet": "",
+                    "bug": "",
+                    "fix": "",
+                    "review": "",
+                    "source_line": idx,
+                }
+                continue
+
+            if current is None or ":" not in line:
+                continue
+
+            key, value = line.split(":", 1)
+            key = key.strip().upper()
+            value = value.strip()
+
+            if key == "LOCATION":
+                current["location"]["raw"] = value
+                line_numbers = [int(num) for num in re.findall(r"\d+", value)]
+                current["location"]["line_start"] = line_numbers[0] if line_numbers else None
+                current["location"]["line_end"] = line_numbers[-1] if len(line_numbers) > 1 else current["location"]["line_start"]
+            elif key == "SNIPPET":
+                snippet_match = re.search(r"`([^`]+)`", value)
+                current["snippet"] = snippet_match.group(1).strip() if snippet_match else value
+            elif key == "BUG":
+                current["bug"] = value
+            elif key == "FIX":
+                current["fix"] = value
+            elif key == "REVIEW":
+                current["review"] = value
+
+        if current is not None:
+            todos.append(current)
+
+        return todos
+
+    def write_todos(self, trial_id: str, todos: list[dict[str, Any]]) -> Path:
+        todo_path = self.get_trial_todo_path(trial_id)
+        todo_path.write_text(json.dumps(todos, indent=2))
+        if todos:
+            print(f"[update TODO] wrote {len(todos)} item(s) for trial {trial_id}")
+        return todo_path
+
+    def read_todos(self, trial_id: str) -> list[dict[str, Any]]:
+        todo_path = self.get_trial_todo_path(trial_id)
+        if not todo_path.exists():
+            return []
+        try:
+            return json.loads(todo_path.read_text())
+        except Exception:
+            return []
+
+    def get_next_pending_todo(self, trial_id: str) -> dict[str, Any] | None:
+        for todo in self.read_todos(trial_id):
+            if todo.get("status") == "pending":
+                return todo
+        return None
+
+    def update_todo_status(
+        self,
+        trial_id: str,
+        todo_id: str,
+        status: str,
+        *,
+        review_notes: str | None = None,
+    ) -> None:
+        todos = self.read_todos(trial_id)
+        for todo in todos:
+            if todo.get("id") != todo_id:
+                continue
+            todo["status"] = status
+            if review_notes is not None:
+                todo["review_notes"] = review_notes
+            summary = todo.get("bug", "").strip() or todo_id
+            print(f"[update TODO] {todo_id} -> {status} ({summary})")
+            break
+        self.write_todos(trial_id, todos)
+
+    def batch_update_todos(
+        self,
+        trial_id: str,
+        updates: list[dict[str, Any]],
+        new_todos: list[dict[str, Any]] | None = None,
+    ) -> None:
+        todos = self.read_todos(trial_id)
+        update_map = {u["id"]: u for u in updates}
+
+        for todo in todos:
+            if todo.get("id") in update_map:
+                up = update_map[todo["id"]]
+                todo["status"] = up.get("status", todo["status"])
+                if "review_notes" in up:
+                    todo["review_notes"] = up["review_notes"]
+                if "reason" in up:
+                    todo["reason"] = up["reason"]
+                summary = todo.get("bug", "").strip() or todo["id"]
+                print(f"[batch TODO] {todo['id']} -> {todo['status']} ({summary})")
+
+        if new_todos:
+            next_order = max((t.get("order", 0) for t in todos), default=0)
+            next_id_num = max(
+                (int(t["id"].split("-")[-1]) for t in todos if "-" in t.get("id", "")),
+                default=0,
+            )
+            for new_todo in new_todos:
+                next_id_num += 1
+                next_order += 1
+                todo_item = {
+                    "id": f"todo-{next_id_num}",
+                    "order": next_order,
+                    "status": "pending",
+                    "location": new_todo.get("location", {"raw": "", "line_start": None, "line_end": None}),
+                    "snippet": new_todo.get("snippet", ""),
+                    "bug": new_todo.get("bug", ""),
+                    "fix": new_todo.get("fix", ""),
+                    "review": new_todo.get("review", ""),
+                    "source_line": new_todo.get("source_line", 1),
+                }
+                todos.append(todo_item)
+            print(f"[batch TODO] added {len(new_todos)} new todo(s) for trial {trial_id}")
+
+        self.write_todos(trial_id, todos)
+
+    def _set_todo_attempts(self, trial_id: str, todo_id: str, attempts: int) -> None:
+        todos = self.read_todos(trial_id)
+        for todo in todos:
+            if todo.get("id") == todo_id:
+                todo["attempts"] = attempts
+                break
+        self.write_todos(trial_id, todos)
 
     def _load_constraints(self) -> dict[str, Any]:
         if not self._constraints and self.constraints_path.exists():
@@ -381,6 +634,17 @@ class MCPServer:
                     conn.commit()
                 except Exception:
                     pass
+
+
+    def clear_all_trials(self) -> int:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM trials")
+            count = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM trials")
+            conn.commit()
+        print(f"[DB] cleared {count} trial record(s)")
+        return count
 
 
 if __name__ == "__main__":

@@ -21,9 +21,11 @@ class TrialScore:
     syntax_pass: bool = False
     simulation_pass: bool = False
     ppa_metrics: dict[str, Any] = field(default_factory=dict)
+    vivado_metrics: dict[str, Any] | None = None
     errors: list[dict] = field(default_factory=list)
     duration_ms: float = 0.0
     retry_count: int = 0
+    trial_id: str = ""
 
     @property
     def pass_(self) -> bool:

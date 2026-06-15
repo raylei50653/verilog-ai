@@ -1,6 +1,5 @@
 import json
 import os
-import time
 from pathlib import Path
 
 import click
@@ -9,7 +8,7 @@ from dotenv import load_dotenv
 from src.llm import create_backend
 from src.pipeline import TrialRunner
 from src.cvdp.loader import CVDPDataset, download_dataset
-from src.cvdp.scoring import ProblemScore, TrialScore, BenchmarkReport
+from src.cvdp.scoring import ProblemScore, BenchmarkReport
 
 
 def load_env():
@@ -29,8 +28,10 @@ def main():
 @click.option("--max-tokens", default=8192, type=int)
 @click.option("--max-retries", default=3, type=int)
 @click.option("--model", default=None, help="Override default model.")
-@click.option("--reuse-rtl", is_flag=True, help="Enable RTL reuse across problems.")
-def run(spec, params, verbose, temperature, max_tokens, max_retries, model, reuse_rtl):
+@click.option("--baseline", is_flag=True, help="Compatibility flag. The baseline workflow is always used.")
+@click.option("--vivado", is_flag=True, help="Run Vivado synthesis analysis on passing trials.")
+@click.option("--part", default=None, help="Xilinx part for Vivado analysis (default: VIVADO_PART env).")
+def run(spec, params, verbose, temperature, max_tokens, max_retries, model, baseline, vivado, part):
     load_env()
 
     try:
@@ -60,7 +61,14 @@ def run(spec, params, verbose, temperature, max_tokens, max_retries, model, reus
         spec = Path(spec).read_text()
 
     backend = create_backend(model=model)
-    runner = TrialRunner(backend)
+    vivado_agent = None
+    if vivado:
+        from src.agents.vivado_ppa import VivadoPPAAgent, find_vivado_wsl
+        vbin = os.getenv("VIVADO_BIN") or find_vivado_wsl() or "vivado"
+        vpart = part or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
+        vivado_agent = VivadoPPAAgent(vivado_bin=vbin, part=vpart)
+        click.echo(f"Vivado: {vbin}  Part: {vpart}")
+    runner = TrialRunner(backend, vivado_agent=vivado_agent)
 
     code, score = runner.run_trial(
         spec=spec,
@@ -72,15 +80,17 @@ def run(spec, params, verbose, temperature, max_tokens, max_retries, model, reus
         temperature=temperature,
         max_tokens=max_tokens,
         max_retries=max_retries,
-        enable_rtl_reuse=reuse_rtl,
         verbose=verbose,
+        baseline_mode=True,
     )
 
     click.echo(f"\nResult: {'PASS' if score.pass_ else 'FAIL'} ({score.duration_ms:.0f}ms)")
     click.echo(f"  Syntax:    {'PASS' if score.syntax_pass else 'FAIL'}")
     click.echo(f"  Simulation: {'PASS' if score.simulation_pass else 'FAIL'}")
-    if score.ppa_metrics:
-        click.echo(f"  PPA: {json.dumps(score.ppa_metrics)}")
+    if vivado_agent and score.vivado_metrics:
+        click.echo(f"  Vivado:    PASS")
+        for key, val in score.vivado_metrics.items():
+            click.echo(f"    {key}: {val}")
     if score.errors:
         click.echo(f"  Errors: {len(score.errors)}")
 
@@ -99,9 +109,9 @@ def run(spec, params, verbose, temperature, max_tokens, max_retries, model, reus
 @click.option("--verbose", "-v", is_flag=True)
 @click.option("--dry-run", is_flag=True, help="Just count problems, don't call LLM.")
 @click.option("--model", default=None, help="Override default model.")
-@click.option("--reuse-rtl", is_flag=True, help="Enable RTL reuse across problems.")
+@click.option("--baseline", is_flag=True, help="Compatibility flag. The baseline workflow is always used.")
 def benchmark(dataset, samples, pass_k, max_problems, category, difficulty,
-              output, temperature, verbose, dry_run, model, reuse_rtl):
+              output, temperature, verbose, dry_run, model, baseline):
     load_env()
 
     k_values = [int(k.strip()) for k in pass_k.split(",")]
@@ -144,10 +154,11 @@ def benchmark(dataset, samples, pass_k, max_problems, category, difficulty,
             code, score = runner.run_trial(
                 spec=problem.prompt,
                 problem_id=problem.id,
+                context_files=dict(problem.context) if problem.context else None,
                 testbench_files=problem.get_testbench_files() if problem.has_testbench() else None,
                 temperature=temperature,
-                enable_rtl_reuse=reuse_rtl,
                 verbose=False,
+                baseline_mode=True,
             )
             score.trial_index = si
             ps.trials.append(score)
@@ -165,96 +176,6 @@ def benchmark(dataset, samples, pass_k, max_problems, category, difficulty,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(report.to_dict(), indent=2))
     click.echo(f"\nSaved to {output_path}")
-
-    output_path = Path(output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(report.to_dict(), indent=2))
-    click.echo(f"\nReport saved to {output_path}")
-
-
-@main.command()
-@click.option("--problem-id", required=True, help="CVDP problem ID.")
-@click.option("--trials", default=50, type=int, help="Number of Optuna trials.")
-@click.option("--objective", default="area", help="Optimization objective.")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output.")
-@click.option("--model", default=None, help="Override default model.")
-@click.option("--reuse-rtl", is_flag=True, help="Enable RTL reuse across problems.")
-def optimize(problem_id, trials, objective, verbose, model, reuse_rtl):
-    load_env()
-    storage_uri = os.getenv("OPTUNA_STORAGE", "sqlite:///data/optuna/optuna.db")
-
-    cvdp = CVDPDataset()
-    problem = cvdp.get_by_id(problem_id)
-    if problem is None:
-        click.echo(f"Problem not found: {problem_id}", err=True)
-        return
-
-    backend = create_backend(model=model)
-    runner = TrialRunner(backend)
-
-    from src.optimizer.optuna_runner import OptunaRunner
-    opt_runner = OptunaRunner(
-        trial_runner=runner,
-        storage_uri=storage_uri,
-    )
-
-    click.echo(f"Starting Optuna optimization for {problem.id}...")
-    click.echo(f"  Objective: {objective}")
-    click.echo(f"  Trials:    {trials}")
-    click.echo(f"  Storage:   {storage_uri}")
-
-    study = opt_runner.optimize_problem(
-        problem=problem,
-        n_trials=trials,
-        objective_metric=objective,
-        enable_rtl_reuse=reuse_rtl,
-        verbose=verbose,
-    )
-
-    click.echo("\nOptimization Completed!")
-    try:
-        best_trial = study.best_trial
-        click.echo(f"Best Trial Value: {best_trial.value}")
-        click.echo(f"Best Parameters:   {best_trial.params}")
-    except ValueError:
-        click.echo("No successful trials found.")
-
-
-@main.command(name="optimize-all")
-@click.option("--dataset", default="nonagentic_no_commercial", help="CVDP dataset subset.")
-@click.option("--trials-per-problem", default=10, type=int, help="Number of trials per problem.")
-@click.option("--objective", default="area", help="Optimization objective.")
-@click.option("--verbose", "-v", is_flag=True, help="Verbose output.")
-@click.option("--model", default=None, help="Override default model.")
-@click.option("--reuse-rtl", is_flag=True, help="Enable RTL reuse across problems.")
-def optimize_all(dataset, trials_per_problem, objective, verbose, model, reuse_rtl):
-    load_env()
-    storage_uri = os.getenv("OPTUNA_STORAGE", "sqlite:///data/optuna/optuna.db")
-
-    cvdp = CVDPDataset(subset=dataset)
-    backend = create_backend(model=model)
-    runner = TrialRunner(backend)
-
-    from src.optimizer.optuna_runner import OptunaRunner
-    opt_runner = OptunaRunner(
-        trial_runner=runner,
-        storage_uri=storage_uri,
-    )
-
-    click.echo(f"Starting multi-problem Optuna optimization over {len(cvdp)} problems...")
-    for idx, problem in enumerate(cvdp):
-        click.echo(f"\n[{idx+1}/{len(cvdp)}] Optimizing {problem.id}...")
-        study = opt_runner.optimize_problem(
-            problem=problem,
-            n_trials=trials_per_problem,
-            objective_metric=objective,
-            enable_rtl_reuse=reuse_rtl,
-            verbose=verbose,
-        )
-        try:
-            click.echo(f"  Best value: {study.best_trial.value}")
-        except ValueError:
-            click.echo("  No successful trials.")
 
 
 @main.command()
@@ -281,6 +202,128 @@ def info(dataset):
 
     with_tb = sum(1 for p in cvdp if p.has_testbench())
     click.echo(f"\nWith testbench: {with_tb}/{len(cvdp)}")
+
+
+@main.command(name="vivado-detect")
+def vivado_detect():
+    """Scan common Windows install paths and print the detected Vivado binary (WSL2 only)."""
+    from src.agents.vivado_ppa import find_vivado_wsl
+    found = find_vivado_wsl()
+    if found:
+        click.echo(f"Found: {found}")
+        click.echo(f"\nAdd to .env:\n  VIVADO_BIN={found}")
+    else:
+        click.echo("Vivado not found in common Windows install paths.")
+        click.echo("Set VIVADO_BIN manually, e.g.:")
+        click.echo("  VIVADO_BIN=/mnt/c/AMDDesignTools/2025.2/Vivado/bin/vivado.bat")
+        click.echo("  VIVADO_BIN=/mnt/c/AMDDesignTools/2025.2/Vivado/bin/unwrapped/win64.o/vvgl.exe")
+
+
+@main.command(name="vivado-analyze")
+@click.option("--rtl", "rtl_path", default=None, help="Path to RTL file (.v/.sv).")
+@click.option("--trial-id", default=None, help="Trial ID to look up RTL from data/outputs/.")
+@click.option("--top", default=None, help="Top module name (default: infer from filename).")
+@click.option("--part", default=None, help="Xilinx part number (default: VIVADO_PART env or xc7a35tcpg236-1).")
+@click.option("--vivado-bin", default=None, help="Path to vivado binary (default: VIVADO_BIN env or auto-detect).")
+@click.option("--timeout", default=600, type=int, help="Synthesis timeout in seconds.")
+@click.option("--output", "-o", default=None, help="Write JSON results to this file.")
+def vivado_analyze(rtl_path, trial_id, top, part, vivado_bin, timeout, output):
+    """Run Vivado synthesis analysis on an RTL file or stored trial (standalone, no pipeline)."""
+    load_env()
+
+    if not rtl_path and not trial_id:
+        click.echo("Error: provide --rtl <file> or --trial-id <id>", err=True)
+        raise SystemExit(1)
+    if rtl_path and trial_id:
+        click.echo("Error: --rtl and --trial-id are mutually exclusive", err=True)
+        raise SystemExit(1)
+
+    rtl_files: dict[str, str] = {}
+
+    if trial_id:
+        from src.mcp.server import MCPServer
+        mcp = MCPServer()
+        out_dir = mcp.db_path.parent.parent / "outputs" / trial_id
+        if not out_dir.exists():
+            click.echo(f"Error: trial output directory not found: {out_dir}", err=True)
+            raise SystemExit(1)
+        found = list(out_dir.rglob("*.sv")) + list(out_dir.rglob("*.v"))
+        if not found:
+            click.echo(f"Error: no .sv/.v files found in {out_dir}", err=True)
+            raise SystemExit(1)
+        for f in found:
+            rtl_files[f.name] = f.read_text()
+        if not top:
+            top = found[0].stem
+        click.echo(f"Trial: {trial_id}  files: {[f.name for f in found]}")
+    else:
+        p = Path(rtl_path)
+        if not p.exists():
+            click.echo(f"Error: file not found: {rtl_path}", err=True)
+            raise SystemExit(1)
+        rtl_files[p.name] = p.read_text()
+        if not top:
+            top = p.stem
+
+    resolved_part = part or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
+
+    # Resolve vivado binary: CLI arg > env var > auto-detect
+    if vivado_bin:
+        resolved_bin = vivado_bin
+    elif os.getenv("VIVADO_BIN"):
+        resolved_bin = os.getenv("VIVADO_BIN")
+    else:
+        from src.agents.vivado_ppa import find_vivado_wsl
+        resolved_bin = find_vivado_wsl() or "vivado"
+        if resolved_bin != "vivado":
+            click.echo(f"Auto-detected Vivado: {resolved_bin}")
+
+    click.echo(f"Part:   {resolved_part}")
+    click.echo(f"Top:    {top}")
+    click.echo(f"Vivado: {resolved_bin}")
+    click.echo("Running synthesis... (this may take several minutes)")
+
+    from src.agents.vivado_ppa import VivadoPPAAgent
+    agent = VivadoPPAAgent(vivado_bin=resolved_bin, part=resolved_part)
+    result = agent.execute(
+        rtl_files=rtl_files,
+        config={"top_module": top, "part": resolved_part, "timeout": timeout},
+    )
+
+    click.echo(f"\nStatus: {'PASS' if result.pass_ else 'FAIL'}  ({result.duration_ms / 1000:.1f}s)")
+
+    if result.pass_:
+        m = result.metrics
+        click.echo("\n--- Utilization ---")
+        for key in ("luts", "luts_logic", "luts_memory", "registers", "dsps", "brams"):
+            if key in m:
+                click.echo(f"  {key:<14}: {m[key]}")
+        click.echo("\n--- Timing ---")
+        for key in ("wns_ns", "tns_ns", "failing_endpoints", "timing_met"):
+            if key in m:
+                click.echo(f"  {key:<20}: {m[key]}")
+        click.echo("\n--- Power ---")
+        if "total_power_w" in m:
+            click.echo(f"  total_power_w       : {m['total_power_w']}")
+    else:
+        for err in result.errors:
+            click.echo(f"  Error: {err.get('message', err)}", err=True)
+
+    if output:
+        import json as _json
+        out = {
+            "pass": result.pass_,
+            "duration_s": result.duration_ms / 1000,
+            "metrics": result.metrics,
+            "errors": result.errors,
+        }
+        if trial_id:
+            out["trial_id"] = trial_id
+        if rtl_path:
+            out["rtl_path"] = rtl_path
+        Path(output).parent.mkdir(parents=True, exist_ok=True)
+        Path(output).write_text(_json.dumps(out, indent=2))
+        click.echo(f"\nSaved to {output}")
 
 
 @main.command()

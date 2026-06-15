@@ -1,4 +1,5 @@
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agents.base import SubAgent, AgentResult
+from src.cancellation import CancellationToken, run_cancelable_command
 
 
 class SyntaxAgent(SubAgent):
@@ -20,8 +22,16 @@ class SyntaxAgent(SubAgent):
     ) -> AgentResult:
         config = config or {}
         timeout = config.get("timeout", 30)
+        cancel_token: CancellationToken | None = config.get("cancel_token")
 
         start = time.monotonic()
+        if shutil.which(self.iverilog_bin) is None:
+            return AgentResult(
+                pass_=False,
+                errors=[{"line": 0, "message": f"Syntax checker '{self.iverilog_bin}' not found on system"}],
+                is_infra_failure=True,
+                duration_ms=(time.monotonic() - start) * 1000,
+            )
         with tempfile.TemporaryDirectory() as tmpdir:
             tmppath = Path(tmpdir)
             sources: list[str] = []
@@ -32,11 +42,10 @@ class SyntaxAgent(SubAgent):
                 sources.append(str(filepath))
 
             try:
-                result = subprocess.run(
+                result = run_cancelable_command(
                     [self.iverilog_bin, "-g2012", "-o", str(tmppath / "a.out"), *sources],
-                    capture_output=True,
-                    text=True,
                     timeout=timeout,
+                    cancel_token=cancel_token,
                 )
             except subprocess.TimeoutExpired:
                 return AgentResult(

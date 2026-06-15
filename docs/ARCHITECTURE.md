@@ -116,8 +116,11 @@ VeriGen is a multi-agent LLM-based Verilog RTL generator with Optuna-driven desi
     "syntax_pass": true,
     "simulation_pass": false,
     "simulation_failures": ["signal_x_mismatch_at_t=100ns"],
-    "ppa_score": {"area": 1234, "delay_ns": 2.1, "power_uw": 450},
+    "ppa_score": {"area": 1234, "area_unit": "cells", "num_modules": 1, "num_wires": 5, "num_cells": 1234},
     "pass": false,
+    "retry_count": 1,
+    "duration_ms": 1500.0,
+    "diagnosis_report": "...",
     "timestamp": "2026-..."
   }
   ```
@@ -286,7 +289,7 @@ verilog-ai/
 ### 7.1 Single Trial (Debug)
 
 ```bash
-verigen run --problem cvdp_async_fifo_0001 --width 8 --depth 16
+verigen run --spec cvdp:cvdp_async_fifo_0001 --params '{"width": 8, "depth": 16}' --verbose
 ```
 
 Runs one trial end-to-end, prints all intermediate results. For development and debugging.
@@ -294,7 +297,7 @@ Runs one trial end-to-end, prints all intermediate results. For development and 
 ### 7.2 Benchmark Run
 
 ```bash
-verigen benchmark --dataset cvdp_nonagentic_no_commercial --pass-k 1,5 --samples 10
+verigen benchmark --dataset nonagentic_no_commercial --pass-k 1,5 --samples 10
 ```
 
 Runs multiple trials per CVDP problem, computes Pass@k. For baseline evaluation.
@@ -302,7 +305,7 @@ Runs multiple trials per CVDP problem, computes Pass@k. For baseline evaluation.
 ### 7.3 Optuna Study
 
 ```bash
-verigen optimize --problem cvdp_async_fifo_0001 --trials 100 --objective area
+verigen optimize --problem-id cvdp_async_fifo_0001 --trials 100 --objective area
 ```
 
 Runs Optuna TPE search over design parameters for a single problem.
@@ -310,7 +313,7 @@ Runs Optuna TPE search over design parameters for a single problem.
 ### 7.4 Full Optimization Run
 
 ```bash
-verigen optimize-all --dataset cvdp_nonagentic_no_commercial --trials-per-problem 50
+verigen optimize-all --dataset nonagentic_no_commercial --trials-per-problem 50
 ```
 
 Runs Optuna optimization across all problems in a CVDP subset.

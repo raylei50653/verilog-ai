@@ -18,6 +18,7 @@ data/cvdp_dataset/
 data/trials/
 data/optuna/
 data/outputs/
+data/workbench/
 
 # Results
 results/
@@ -34,6 +35,10 @@ Thumbs.db
 
 # Docker
 *.tar
+
+# Simulation artifacts
+sim.log
+sim_build/
 
 # pytest
 .pytest_cache/

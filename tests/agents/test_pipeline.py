@@ -25,14 +25,14 @@ class TestSimulationAgent:
         assert "cocotb" in result.warnings[0]["message"].lower()
 
     @patch("src.agents.simulation.shutil.which")
-    @patch("src.agents.simulation.subprocess.run")
-    def test_iverilog_sim_pass(self, mock_run, mock_which):
+    @patch("src.agents.simulation.run_cancelable_command")
+    def test_iverilog_sim_pass(self, mock_run_cmd, mock_which):
         mock_which.return_value = "/usr/bin/iverilog"
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "PASSED"
         mock_result.stderr = ""
-        mock_run.side_effect = [mock_result, mock_result]
+        mock_run_cmd.side_effect = [mock_result, mock_result]
 
         from src.agents.simulation import SimulationAgent
 
@@ -44,12 +44,12 @@ class TestSimulationAgent:
         assert result.pass_
 
     @patch("src.agents.simulation.shutil.which")
-    @patch("src.agents.simulation.subprocess.run")
-    def test_sim_timeout(self, mock_run, mock_which):
+    @patch("src.agents.simulation.run_cancelable_command")
+    def test_sim_timeout(self, mock_run_cmd, mock_which):
         import subprocess
 
         mock_which.return_value = "/usr/bin/iverilog"
-        mock_run.side_effect = subprocess.TimeoutExpired(cmd="iverilog", timeout=1)
+        mock_run_cmd.side_effect = subprocess.TimeoutExpired(cmd="iverilog", timeout=1)
 
         from src.agents.simulation import SimulationAgent
 
@@ -68,14 +68,14 @@ class TestSimulationAgent:
         assert not agent._is_cocotb_testbench({"tb.sv": "module tb; endmodule"})
 
     @patch("src.agents.simulation.SimulationAgent._check_docker")
-    @patch("src.agents.simulation.subprocess.run")
-    def test_cocotb_testbench_docker(self, mock_run, mock_check_docker):
+    @patch("src.agents.simulation.run_cancelable_command")
+    def test_cocotb_testbench_docker(self, mock_run_cmd, mock_check_docker):
         mock_check_docker.return_value = True
         mock_result = MagicMock()
         mock_result.returncode = 0
         mock_result.stdout = "pytest passed"
         mock_result.stderr = ""
-        mock_run.return_value = mock_result
+        mock_run_cmd.return_value = mock_result
 
         from src.agents.simulation import SimulationAgent
 
@@ -85,9 +85,9 @@ class TestSimulationAgent:
             {"src/.env": "SIM=icarus\n", "src/test_top.py": "import cocotb", "src/test_runner.py": ""},
         )
         assert result.pass_
-        assert mock_run.called
+        assert mock_run_cmd.called
         # Verify docker command args
-        args = mock_run.call_args[0][0]
+        args = mock_run_cmd.call_args[0][0]
         assert "docker" in args
         assert "run" in args
         assert "pytest" in args

@@ -20,14 +20,21 @@ from textual.widgets import (
     Checkbox,
     TextArea,
     Select,
+    ContentSwitcher,
 )
 from textual import work
+from textual.worker import Worker, WorkerState
 
+from dotenv import load_dotenv
+
+load_dotenv()
+from rich.markup import escape
+
+from src.cancellation import CancellationToken, PipelineCancelled
 from src.llm import create_backend
 from src.pipeline import TrialRunner
 from src.cvdp.loader import CVDPDataset
 from src.mcp.server import MCPServer
-from src.optimizer.optuna_runner import OptunaRunner
 
 
 class StdoutRedirector:
@@ -105,40 +112,118 @@ class VeriGenTUI(App):
         height: 3;
         width: 100%;
     }
-    #btn-run {
+    #btn-run, #btn-vivado {
         width: 60%;
         background: #50fa7b;
         color: #282a36;
     }
-    #btn-run:hover {
+    #btn-run:hover, #btn-vivado:hover {
         background: #85fa9b;
     }
-    #btn-stop {
+    #btn-stop, #btn-vivado-stop {
         width: 40%;
         background: #ff5555;
         color: #f8f8f2;
     }
-    #btn-stop:hover {
+    #btn-stop:hover, #btn-vivado-stop:hover {
         background: #ff6e6e;
     }
-    .log-view {
-        height: 30%;
-        border: solid #44475a;
+    #btn-copy-logs, #btn-copy-sim-log {
+        width: 50%;
         margin-top: 1;
+    }
+    #btn-to-vivado {
+        width: 50%;
+        margin-top: 1;
+        background: #6272a4;
+        color: #f8f8f2;
+    }
+    #btn-to-vivado:hover {
+        background: #7a8ac0;
+    }
+    #btn-vivado-mkproj {
+        width: 100%;
+        margin-top: 1;
+        background: #44475a;
+        color: #f8f8f2;
+    }
+    #btn-vivado-mkproj:hover {
+        background: #5a5f78;
+    }
+    #btn-vivado-gui {
+        width: 100%;
+        margin-top: 1;
+        background: #6272a4;
+        color: #f8f8f2;
+    }
+    #btn-vivado-gui:hover {
+        background: #7a8ac0;
+    }
+    #docker-status {
+        margin-left: 2;
+        text-style: bold;
+    }
+    #btn-docker-retry {
+        width: 3;
+        min-width: 3;
+        height: 1;
+        border: none;
+        background: transparent;
+        color: #6272a4;
+        margin-left: 0;
+        padding: 0;
+    }
+    #btn-docker-retry:hover {
+        color: #f8f8f2;
+    }
+    .docker-checking { color: #f1fa8c; }
+    .docker-starting { color: #ffb86c; }
+    .docker-running  { color: #50fa7b; }
+    .docker-stopped  { color: #ff5555; }
+    .log-view {
+        height: 100%;
         background: #282a36;
     }
     .code-view {
-        height: 40%;
-        border: solid #44475a;
-        margin-top: 1;
+        height: 100%;
         background: #282a36;
     }
     .status-view {
-        height: 12%;
+        height: 4;
         background: #282a36;
         border: solid #44475a;
         padding: 1;
         color: #f8f8f2;
+    }
+    #panel-toggle {
+        height: 3;
+        margin-top: 1;
+    }
+    .panel-tab {
+        width: 25%;
+        background: #44475a;
+        color: #6272a4;
+        border: none;
+        text-style: bold;
+    }
+    .panel-tab:hover {
+        background: #555770;
+        color: #f8f8f2;
+    }
+    .panel-tab-active {
+        background: #6272a4;
+        color: #f8f8f2;
+    }
+    #panel-switcher {
+        height: 1fr;
+        border: solid #44475a;
+    }
+    #panel-logs, #panel-sim, #panel-code, #panel-todo {
+        height: 100%;
+    }
+    #todo-log {
+        height: 100%;
+        background: #282a36;
     }
     .opt-trials-view {
         height: 70%;
@@ -154,6 +239,22 @@ class VeriGenTUI(App):
         background: #282a36;
         border: solid #44475a;
     }
+    #btn-kill-sim {
+        width: auto;
+        min-width: 14;
+        height: 3;
+        background: #44475a;
+        color: #6272a4;
+        border: none;
+        margin-left: 2;
+    }
+    #btn-kill-sim:enabled {
+        background: #ff5555;
+        color: #f8f8f2;
+    }
+    #btn-kill-sim:enabled:hover {
+        background: #ff6e6e;
+    }
     .status-step {
         padding: 0 1;
         text-style: bold;
@@ -163,6 +264,16 @@ class VeriGenTUI(App):
     .status-arrow {
         color: #6272a4;
         padding: 0 1;
+    }
+    #status-header {
+        height: 1;
+        margin-bottom: 1;
+    }
+    #todo-summary {
+        width: 40%;
+        content-align: right middle;
+        color: #f1fa8c;
+        text-style: bold;
     }
     .inactive {
         background: #44475a;
@@ -182,7 +293,7 @@ class VeriGenTUI(App):
     }
     """
 
-    TITLE = "VeriGen - RTL Generator & Optimizer"
+    TITLE = "VeriGen - RTL Generator & Vivado"
     BINDINGS = [("q", "quit", "Quit App")]
 
     def compose(self) -> ComposeResult:
@@ -205,80 +316,198 @@ class VeriGenTUI(App):
                         yield Input(placeholder="e.g. deepseek-coder-v2", id="run-model")
                         yield Label("Max Retries:", classes="field-label")
                         yield Input(value="3", id="run-max-retries")
-                        yield Checkbox("Enable RTL Reuse", value=False, id="run-reuse")
                         yield Checkbox("Show AI Thinking", value=False, id="run-show-thinking")
                         with Horizontal(classes="btn-group"):
                             yield Button("Generate RTL", variant="success", id="btn-run")
                             yield Button("Stop", variant="error", id="btn-stop", disabled=True)
+                        with Horizontal():
+                            yield Button("Copy Logs", variant="primary", id="btn-copy-logs")
+                            yield Button("Copy SIM Log", id="btn-copy-sim-log")
+                            yield Button("Vivado →", id="btn-to-vivado", disabled=True)
 
                     with Vertical(classes="right-panel"):
-                        yield Label("Pipeline Progress Status:")
+                        with Horizontal(id="status-header"):
+                            yield Label("Pipeline Progress Status:")
+                            yield Label("No TODOs", id="todo-summary")
+                            yield Label("◌ Docker: Checking...", id="docker-status", classes="docker-checking")
+                            yield Button("⟳", id="btn-docker-retry")
                         with Horizontal(id="runner-status-bar"):
-                            yield Label("PLAN", id="step-plan", classes="status-step inactive")
-                            yield Label(" -> ", classes="status-arrow")
                             yield Label("GEN", id="step-gen", classes="status-step inactive")
                             yield Label(" -> ", classes="status-arrow")
                             yield Label("SYNTAX", id="step-syntax", classes="status-step inactive")
                             yield Label(" -> ", classes="status-arrow")
                             yield Label("SIM", id="step-sim", classes="status-step inactive")
                             yield Label(" -> ", classes="status-arrow")
-                            yield Label("PPA", id="step-ppa", classes="status-step inactive")
+                            yield Label("TODO", id="step-todo", classes="status-step inactive")
+                            yield Label(" -> ", classes="status-arrow")
+                            yield Label("FIX", id="step-fix", classes="status-step inactive")
                             yield Label(" -> ", classes="status-arrow")
                             yield Label("DB", id="step-db", classes="status-step inactive")
-                        yield Label("Pipeline Logs:")
-                        yield RichLog(highlight=True, markup=True, classes="log-view", id="run-log")
-                        yield Label("Generated Verilog Code:")
-                        yield TextArea(read_only=True, language="verilog", classes="code-view", id="run-code")
-                        yield Label("Status Summary:")
-                        yield Label("Ready to run.", classes="status-view", id="run-status")
+                            yield Button("⊗ Kill SIM", id="btn-kill-sim", disabled=True)
+                        with Horizontal(id="panel-toggle"):
+                            yield Button("Pipeline Logs", id="btn-panel-logs", classes="panel-tab panel-tab-active")
+                            yield Button("SIM Log", id="btn-panel-sim", classes="panel-tab")
+                            yield Button("Generated Code", id="btn-panel-code", classes="panel-tab")
+                            yield Button("TODO List", id="btn-panel-todo", classes="panel-tab")
+                        with ContentSwitcher(initial="panel-logs", id="panel-switcher"):
+                            with Vertical(id="panel-logs"):
+                                yield RichLog(highlight=True, markup=True, classes="log-view", id="run-log")
+                            with Vertical(id="panel-sim"):
+                                yield RichLog(highlight=True, markup=True, classes="log-view", id="sim-log")
+                            with Vertical(id="panel-code"):
+                                yield TextArea(read_only=True, language="verilog", classes="code-view", id="run-code")
+                            with Vertical(id="panel-todo"):
+                                yield RichLog(highlight=True, markup=True, id="todo-log")
 
-            with TabPane("Optimizer", id="tab-opt"):
+            with TabPane("Vivado", id="tab-vivado"):
                 with Horizontal():
                     with Vertical(classes="left-panel"):
-                        yield Label("CVDP Problem ID:", classes="field-label")
-                        opt_options = [
-                            (f"[{CVDP_PROBLEM_DIFFS.get(pid, 'unknown').upper()}] {pid}", pid)
-                            for pid in CVDP_PROBLEM_IDS
-                        ]
-                        default_opt_val = "cvdp_copilot_16qam_mapper_0001" if "cvdp_copilot_16qam_mapper_0001" in CVDP_PROBLEM_IDS else CVDP_PROBLEM_IDS[0]
-                        yield Select(opt_options, value=default_opt_val, id="opt-problem-id")
-                        yield Label("Objective Metric:", classes="field-label")
-                        yield Input(value="area", id="opt-objective")
-                        yield Label("Trials count:", classes="field-label")
-                        yield Input(value="5", id="opt-trials")
-                        yield Label("Model Name Override:", classes="field-label")
-                        yield Input(placeholder="e.g. deepseek-coder-v2", id="opt-model")
-                        yield Checkbox("Enable RTL Reuse", value=True, id="opt-reuse")
-                        yield Button("Start Optimization", variant="success", id="btn-optimize", classes="run-btn")
+                        yield Label("Trial ID:", classes="field-label")
+                        yield Input(placeholder="e.g. abc123def456", id="vivado-trial-id")
+                        yield Label("Top Module:", classes="field-label")
+                        yield Input(value="", placeholder="auto-detect", id="vivado-top")
+                        yield Label("Xilinx Part:", classes="field-label")
+                        yield Input(value=os.getenv("VIVADO_PART", "xc7a35tcpg236-1"), id="vivado-part")
+                        with Horizontal(classes="btn-group"):
+                            yield Button("Run Vivado", variant="success", id="btn-vivado")
+                            yield Button("Stop", variant="error", id="btn-vivado-stop", disabled=True)
+                        yield Button("Make Project", id="btn-vivado-mkproj")
+                        yield Button("Open Vivado GUI", id="btn-vivado-gui")
 
                     with Vertical(classes="right-panel"):
-                        yield Label("Best Score Summary:")
-                        yield Label("No runs yet.", classes="status-view", id="opt-status")
-                        yield Label("Optuna Trial History:")
-                        yield DataTable(classes="opt-trials-view", id="opt-table")
+                        yield Label("Status:")
+                        yield Label("No runs yet.", classes="status-view", id="vivado-status")
+                        yield Label("Results:")
+                        yield RichLog(highlight=True, markup=True, classes="log-view", id="vivado-log")
 
             with TabPane("Database History", id="tab-db"):
                 with Horizontal():
                     with Vertical(classes="left-panel"):
                         yield Label("Search Pattern:", classes="field-label")
                         yield Input(placeholder="e.g. counter, fifo", id="db-search")
-                        yield Button("Refresh", variant="primary", id="btn-db-refresh", classes="run-btn")
+                        with Horizontal(classes="btn-group"):
+                            yield Button("Refresh", variant="primary", id="btn-db-refresh")
+                            yield Button("Clear All", variant="error", id="btn-db-clear")
+                        with Horizontal():
+                            yield Button("Vivado →", id="btn-db-to-vivado")
                     with Vertical(classes="right-panel"):
                         yield Label("Saved Trial Records:")
-                        yield DataTable(classes="opt-trials-view", id="db-table")
+                        yield DataTable(classes="opt-trials-view", id="db-table", cursor_type="row")
                         yield Label("Selected Code:")
                         yield RichLog(highlight=True, markup=True, classes="code-view", id="db-code")
 
         yield Footer()
 
+    SPINNER_CHARS = ["◐", "◓", "◑", "◒"]
+    STEP_LABELS = {
+        "plan": "PLAN",
+        "gen": "GEN",
+        "todo": "TODO",
+        "fix": "FIX",
+        "syntax": "SYNTAX",
+        "sim": "SIM",
+        "ppa": "PPA",
+        "db": "DB",
+    }
+
     def on_mount(self) -> None:
-        # Initialize tables
-        opt_table = self.query_one("#opt-table", DataTable)
-        opt_table.add_columns("Trial #", "Parameters", "Metric Value", "State")
+        self.run_log_buffer: list[str] = []
+        self._spinner_idx = 0
+        self._spinner_steps: set[str] = set()
+        self.set_interval(0.15, self._update_spinner)
 
         db_table = self.query_one("#db-table", DataTable)
         db_table.add_columns("Trial ID", "Problem ID", "Parameters", "Passed", "Duration")
         self.refresh_database_table()
+        self.check_docker_worker = self._check_and_start_docker()
+
+    # ── Docker helpers ────────────────────────────────────────────────────────
+
+    def _set_docker_label(self, state: str, msg: str) -> None:
+        label = self.query_one("#docker-status", Label)
+        label.remove_class("docker-checking", "docker-starting", "docker-running", "docker-stopped")
+        label.add_class(f"docker-{state}")
+        label.update(msg)
+
+    @staticmethod
+    def _docker_running() -> bool:
+        import subprocess as _sp
+        try:
+            return _sp.run(["docker", "info"], capture_output=True, timeout=5).returncode == 0
+        except Exception:
+            return False
+
+    @staticmethod
+    def _find_docker_desktop() -> str | None:
+        candidates = [
+            "/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe",
+            "/mnt/c/Program Files (x86)/Docker/Docker/Docker Desktop.exe",
+        ]
+        for c in candidates:
+            if Path(c).exists():
+                return c
+        return None
+
+    @work(thread=True)
+    def _check_and_start_docker(self) -> None:
+        import subprocess as _sp, time as _time
+
+        self.call_from_thread(self._set_docker_label, "checking", "◌ Docker: Checking...")
+
+        if self._docker_running():
+            self.call_from_thread(self._set_docker_label, "running", "● Docker: Running")
+            return
+
+        # Not running — try to start Docker Desktop
+        desktop = self._find_docker_desktop()
+        if desktop:
+            self.call_from_thread(self._set_docker_label, "starting", "◐ Docker: Starting...")
+            try:
+                _sp.Popen([desktop], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+            except Exception:
+                pass
+
+            for _ in range(20):          # poll up to 60 s
+                _time.sleep(3)
+                if self._docker_running():
+                    self.call_from_thread(self._set_docker_label, "running", "● Docker: Running")
+                    return
+
+            self.call_from_thread(self._set_docker_label, "stopped", "✗ Docker: Timed out")
+        else:
+            self.call_from_thread(self._set_docker_label, "stopped", "✗ Docker: Not found")
+
+    # ── Spinner ───────────────────────────────────────────────────────────────
+
+    def _update_spinner(self) -> None:
+        if not self._spinner_steps:
+            return
+        self._spinner_idx = (self._spinner_idx + 1) % len(self.SPINNER_CHARS)
+        char = self.SPINNER_CHARS[self._spinner_idx]
+        for step_name in list(self._spinner_steps):
+            base = self.STEP_LABELS.get(step_name, step_name.upper())
+            try:
+                self.query_one(f"#step-{step_name}", Label).update(f"{char} {base}")
+            except Exception:
+                pass
+
+    def update_todo_summary(self, trial_id: str) -> None:
+        todo_summary = self.query_one("#todo-summary", Label)
+        mcp = MCPServer()
+        todos = mcp.read_todos(trial_id)
+        if not todos:
+            todo_summary.update("No TODOs")
+            return
+
+        total = len(todos)
+        active = next((todo for todo in todos if todo.get("status") in {"active", "pending"}), None)
+        if active is None:
+            todo_summary.update(f"{total}/{total} (done)")
+            return
+
+        order = active.get("order", 1)
+        name = active.get("bug", "").strip() or active.get("id", "task")
+        todo_summary.update(f"{order}/{total} ({name})")
 
     def refresh_database_table(self) -> None:
         db_table = self.query_one("#db-table", DataTable)
@@ -313,7 +542,9 @@ class VeriGenTUI(App):
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "run-problem-id":
             val = event.value
-            if val and val != "custom" and val != Select.BLANK:
+            is_cvdp = val and val != "custom" and val != Select.BLANK
+            self.query_one("#btn-to-vivado", Button).disabled = not is_cvdp
+            if is_cvdp:
                 try:
                     cvdp = CVDPDataset()
                     prob = cvdp.get_by_id(val)
@@ -321,7 +552,7 @@ class VeriGenTUI(App):
                         self.query_one("#run-spec", Input).value = prob.prompt
                 except Exception:
                     pass
-            elif val == "custom":
+            else:
                 self.query_one("#run-spec", Input).value = "Implement a simple 2-to-1 multiplexer"
 
     def set_step_status(self, step_name: str, status: str) -> None:
@@ -329,6 +560,17 @@ class VeriGenTUI(App):
             label = self.query_one(f"#step-{step_name}", Label)
             label.remove_class("inactive", "active", "success", "fail")
             label.add_class(status)
+            if status == "active":
+                self._spinner_steps.add(step_name)
+            else:
+                self._spinner_steps.discard(step_name)
+                base = self.STEP_LABELS.get(step_name, step_name.upper())
+                label.update(base)
+            if step_name == "sim":
+                try:
+                    self.query_one("#btn-kill-sim", Button).disabled = (status != "active")
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -337,6 +579,7 @@ class VeriGenTUI(App):
         if table.id == "db-table":
             row_data = table.get_row(event.row_key)
             trial_id = row_data[0]
+            self._selected_db_trial_id = trial_id
             mcp = MCPServer()
             db_code = self.query_one("#db-code", RichLog)
             db_code.clear()
@@ -354,21 +597,30 @@ class VeriGenTUI(App):
     @work(thread=True)
     def run_generation_task(self) -> None:
         run_log = self.query_one("#run-log", RichLog)
+        sim_log = self.query_one("#sim-log", RichLog)
+        todo_log = self.query_one("#todo-log", RichLog)
         run_code = self.query_one("#run-code", TextArea)
-        run_status = self.query_one("#run-status", Label)
+        cancel_token = CancellationToken()
+        self.current_cancel_token = cancel_token
+        self.run_log_buffer = []
+        self.sim_log_buffer: list[str] = []
+        current_trial_id: list[str] = []
 
         self.call_from_thread(run_log.clear)
+        self.call_from_thread(sim_log.clear)
+        self.call_from_thread(todo_log.clear)
+        self.call_from_thread(self.query_one("#todo-summary", Label).update, "No TODOs")
+        self.call_from_thread(self._switch_panel, "panel-logs")
         def clear_code():
             run_code.text = ""
         self.call_from_thread(clear_code)
-        self.call_from_thread(run_status.update, "Running RTL generation pipeline...")
+        self.call_from_thread(run_log.write, "Running baseline RTL pipeline...")
 
         spec = self.query_one("#run-spec", Input).value.strip()
         problem_id = self.query_one("#run-problem-id", Select).value
         params_str = self.query_one("#run-params", Input).value.strip()
         model = self.query_one("#run-model", Input).value.strip() or None
         max_retries = int(self.query_one("#run-max-retries", Input).value)
-        reuse_rtl = self.query_one("#run-reuse", Checkbox).value
         show_thinking = self.query_one("#run-show-thinking", Checkbox).value
 
         # Resolve CVDP problem if requested
@@ -384,14 +636,14 @@ class VeriGenTUI(App):
                     tb_files = prob.get_testbench_files()
             except Exception as e:
                 self.call_from_thread(run_log.write, f"[red]Error loading CVDP problem: {e}[/red]")
-                self.call_from_thread(run_status.update, "Failed loading CVDP problem.")
+                self.call_from_thread(run_log.write, "[red]Failed loading CVDP problem.[/red]")
                 return
 
         try:
             params = json.loads(params_str)
         except Exception as e:
             self.call_from_thread(run_log.write, f"[red]Invalid JSON params: {e}[/red]")
-            self.call_from_thread(run_status.update, "Failed due to invalid parameters.")
+            self.call_from_thread(run_log.write, "[red]Failed due to invalid parameters.[/red]")
             return
 
         backend = create_backend(model=model)
@@ -399,29 +651,49 @@ class VeriGenTUI(App):
         runner = TrialRunner(backend)
 
         def write_to_log(s):
-            self.call_from_thread(run_log.write, s.strip())
+            text = s.strip()
+            if text:
+                self.run_log_buffer.append(text)
+                self.call_from_thread(run_log.write, escape(text))
 
         def handle_step_change(step, status):
-            if hasattr(self, "generator_worker") and self.generator_worker.is_cancelled:
-                raise RuntimeError("cancelled by user")
+            cancel_token.raise_if_cancelled()
             self.call_from_thread(self.set_step_status, step, status)
+            if step == "sim" and status == "active":
+                self.call_from_thread(self._switch_panel, "panel-sim")
+            if step in ("todo", "fix") and status in ("success", "active", "fail") and current_trial_id:
+                tid = current_trial_id[0]
+                self.call_from_thread(self._refresh_todo_panel, tid)
+
+        def on_trial_start(trial_id: str) -> None:
+            current_trial_id.clear()
+            current_trial_id.append(trial_id)
 
         accumulated_text = ""
+        switched_to_code = False
         def handle_token(token: str):
-            if hasattr(self, "generator_worker") and self.generator_worker.is_cancelled:
-                raise RuntimeError("cancelled by user")
-            nonlocal accumulated_text
+            cancel_token.raise_if_cancelled()
+            nonlocal accumulated_text, switched_to_code
             if token == "":
                 accumulated_text = ""
+                switched_to_code = False
             else:
+                if not switched_to_code:
+                    switched_to_code = True
+                    self.call_from_thread(self._switch_panel, "panel-code")
                 accumulated_text += token
             def update_ui():
                 run_code.text = accumulated_text
-                # Scroll to the bottom by placing cursor at the end of text
                 lines = accumulated_text.splitlines()
                 if lines:
                     run_code.cursor_location = (len(lines) - 1, len(lines[-1]))
             self.call_from_thread(update_ui)
+
+        def _on_sim_line(line: str) -> None:
+            stripped = line.strip()
+            if stripped:
+                self.sim_log_buffer.append(stripped)
+                self.call_from_thread(sim_log.write, escape(stripped))
 
         try:
             with StdoutRedirector(write_to_log):
@@ -432,11 +704,13 @@ class VeriGenTUI(App):
                     context_files=context_files,
                     testbench_files=tb_files,
                     max_retries=max_retries,
-                    enable_rtl_reuse=reuse_rtl,
                     verbose=True,
                     on_step_change=handle_step_change,
                     on_token=handle_token,
                     enable_thinking=show_thinking,
+                    cancel_token=cancel_token,
+                    on_trial_start=on_trial_start,
+                    on_sim_output=_on_sim_line,
                 )
             
             def set_final_code():
@@ -446,153 +720,409 @@ class VeriGenTUI(App):
                 f"Result: {'PASS' if score.pass_ else 'FAIL'} ({score.duration_ms:.0f}ms)\n"
                 f"  Syntax:     {'PASS' if score.syntax_pass else 'FAIL'}\n"
                 f"  Simulation: {'PASS' if score.simulation_pass else 'FAIL'}\n"
-                f"  PPA Score:  {json.dumps(score.ppa_metrics or {})}"
+                f"  Retries:    {score.retry_count}"
             )
-            self.call_from_thread(run_status.update, status_text)
+            self.call_from_thread(run_log.write, status_text)
             self.call_from_thread(self.refresh_database_table)
+            if getattr(score, "trial_id", ""):
+                self.call_from_thread(self.update_todo_summary, score.trial_id)
+            else:
+                self.call_from_thread(self.query_one("#todo-summary", Label).update, "No TODOs")
+        except PipelineCancelled:
+            self.call_from_thread(run_log.write, "[yellow]Pipeline cancelled by user.[/yellow]")
         except Exception as e:
-            # If worker was cancelled, silently exit to avoid overriding a new run's UI state
-            if hasattr(self, "generator_worker") and self.generator_worker.is_cancelled:
-                return
-
             self.call_from_thread(run_log.write, f"[red]Execution error: {e}[/red]")
-            self.call_from_thread(run_status.update, "Pipeline execution error.")
-            for step in ["plan", "gen", "syntax", "sim", "ppa", "db"]:
+            for step in ["gen", "todo", "syntax", "sim", "db"]:
                 self.call_from_thread(self.set_step_status, step, "fail")
         finally:
-            if hasattr(self, "generator_worker") and self.generator_worker.is_cancelled:
-                return
             def restore_buttons():
-                self.query_one("#btn-run", Button).disabled = False
-                self.query_one("#btn-stop", Button).disabled = True
+                if getattr(self, "current_cancel_token", None) is cancel_token:
+                    self.query_one("#btn-run", Button).disabled = False
+                    self.query_one("#btn-stop", Button).disabled = True
+                    self.current_cancel_token = None
             self.call_from_thread(restore_buttons)
 
     @work(thread=True)
-    def run_optimization_task(self) -> None:
-        opt_status = self.query_one("#opt-status", Label)
-        opt_table = self.query_one("#opt-table", DataTable)
-
-        self.call_from_thread(opt_status.update, "Initializing Optuna Study...")
-        self.call_from_thread(opt_table.clear)
-
-        problem_id = self.query_one("#opt-problem-id", Select).value
-        objective_metric = self.query_one("#opt-objective", Input).value.strip()
-        trials_count = int(self.query_one("#opt-trials", Input).value)
-        model = self.query_one("#opt-model", Input).value.strip() or None
-        reuse_rtl = self.query_one("#opt-reuse", Checkbox).value
-
-        # Fetch problem
+    def run_vivado_task(self, trial_id: str, top_module: str | None, part: str, vivado_status: Label, vivado_log: RichLog) -> None:
+        self.call_from_thread(vivado_status.update, "Running Vivado synthesis...")
+        self.call_from_thread(vivado_log.clear)
         try:
-            cvdp = CVDPDataset()
-            problem = cvdp.get_by_id(problem_id)
-            if not problem:
-                self.call_from_thread(opt_status.update, f"[red]Problem not found: {problem_id}[/red]")
-                return
+            self._run_vivado_inner(trial_id, top_module, part, vivado_status, vivado_log)
         except Exception as e:
-            self.call_from_thread(opt_status.update, f"[red]Error: {e}[/red]")
+            self.call_from_thread(vivado_status.update, f"[red]Unexpected error: {e}[/red]")
+        finally:
+            self._restore_vivado_buttons()
+
+    def _run_vivado_inner(self, trial_id: str, top_module: str | None, part: str, vivado_status: Label, vivado_log: RichLog) -> None:
+        def log(msg: str) -> None:
+            self.call_from_thread(vivado_log.write, msg)
+
+        def status(msg: str) -> None:
+            self.call_from_thread(vivado_status.update, msg)
+
+        if not trial_id:
+            status("[red]Enter a trial ID.[/red]")
+            log("[red]No trial ID entered. Paste a trial ID from the Database tab.[/red]")
             return
 
-        storage_uri = os.getenv("OPTUNA_STORAGE", "sqlite:///data/optuna/optuna.db")
-        backend = create_backend(model=model)
-        runner = TrialRunner(backend)
-        opt_runner = OptunaRunner(trial_runner=runner, storage_uri=storage_uri)
+        from src.agents.vivado_ppa import VivadoPPAAgent, find_vivado_wsl
+        from src.mcp.server import MCPServer
 
-        def optuna_callback(study, trial):
-            state_str = str(trial.state).replace("TrialState.", "")
-            val_str = f"{trial.value}" if trial.value is not None and trial.value < 1e8 else "Penalty"
-            self.call_from_thread(
-                opt_table.add_row,
-                f"{trial.number}",
-                json.dumps(trial.params),
-                val_str,
-                state_str,
-            )
-            # Update summary
-            best_val = f"{study.best_value}" if study.best_value < 1e8 else "No passing runs"
-            self.call_from_thread(
-                opt_status.update,
-                f"Study: {study.study_name}\n"
-                f"Best Objective: {best_val}\n"
-                f"Best Parameters: {json.dumps(study.best_params)}"
-            )
+        vbin = os.getenv("VIVADO_BIN") or find_vivado_wsl() or "vivado"
+        if vbin == "vivado":
+            log("[yellow]Vivado not auto-detected — set VIVADO_BIN in .env[/yellow]")
+
+        out_dir = MCPServer().get_trial_output_dir(trial_id)
+        if not out_dir.exists():
+            status("[red]Trial not found.[/red]")
+            log(f"[red]Trial output directory not found:[/red] {out_dir}")
+            log("Use the Database tab to find a valid trial ID.")
+            return
+
+        found = list(out_dir.rglob("*.sv")) + list(out_dir.rglob("*.v"))
+        if not found:
+            status("[red]No RTL files.[/red]")
+            log(f"[red]No .sv / .v files found under {out_dir}[/red]")
+            return
+
+        rtl_files = {f.name: f.read_text() for f in found}
+        if not top_module:
+            top_module = found[0].stem
+
+        log(f"Trial:  {trial_id}")
+        log(f"Files:  {[f.name for f in found]}")
+        log(f"Vivado: {vbin}")
+        log(f"Part:   {part}   Top: {top_module}")
+        log("Synthesizing — this may take several minutes...")
 
         try:
-            # Modify study optimization call temporarily to plug callback
-            study_name = f"study_{problem.id}_{objective_metric}"
-            import optuna
-            study = optuna.create_study(
-                study_name=study_name,
-                storage=storage_uri,
-                direction="minimize",
-                load_if_exists=True,
-            )
+            agent = VivadoPPAAgent(vivado_bin=vbin, part=part)
+            result = agent.execute(rtl_files=rtl_files, config={"top_module": top_module})
+        except Exception as e:
+            status("[red]Vivado error.[/red]")
+            log(f"[red]Exception: {e}[/red]")
+            return
 
-            parameter_space = opt_runner.get_space_for_problem(problem)
+        if result.pass_:
+            m = result.metrics
+            luts = m.get("luts", m.get("luts_logic", 0) + m.get("luts_memory", 0))
+            timing_met = m.get("timing_met")
+            timing_str = "YES" if timing_met else ("NO" if timing_met is False else "N/A")
+            status("[bold green]Synthesis PASSED[/bold green]")
+            log(f"[bold green]PASS[/bold green] ({result.duration_ms / 1000:.1f}s)")
+            log("")
+            log("[bold]Utilization:[/bold]")
+            log(f"  LUTs:        {luts}")
+            log(f"  LUTs Logic:  {m.get('luts_logic', '?')}")
+            log(f"  LUTs Memory: {m.get('luts_memory', '?')}")
+            log(f"  Registers:   {m.get('registers', '?')}")
+            log(f"  DSPs:        {m.get('dsps', '?')}")
+            log(f"  BRAMs:       {m.get('brams', '?')}")
+            log("")
+            log("[bold]Timing:[/bold]")
+            log(f"  WNS:         {m.get('wns_ns', 'N/A')} ns")
+            log(f"  TNS:         {m.get('tns_ns', 'N/A')} ns")
+            log(f"  Timing Met:  {timing_str}")
+            log("")
+            log("[bold]Power:[/bold]")
+            log(f"  Total:       {m.get('total_power_w', '?')} W")
+        else:
+            err = result.errors[0].get("message", "unknown") if result.errors else "unknown"
+            status("[red]Synthesis FAILED[/red]")
+            log("[red]Synthesis FAILED[/red]")
+            log(f"[red]{err[:2000]}[/red]")
 
-            def objective(trial):
-                trial_params = {}
-                for param_name, param_cfg in parameter_space.items():
-                    ptype = param_cfg.get("type")
-                    if ptype == "categorical":
-                        trial_params[param_name] = trial.suggest_categorical(param_name, param_cfg["choices"])
-                    elif ptype == "int":
-                        low = param_cfg["low"]
-                        high = param_cfg["high"]
-                        step = param_cfg.get("step", 1)
-                        trial_params[param_name] = trial.suggest_int(param_name, low, high, step=step)
-                    elif ptype == "float":
-                        low = param_cfg["low"]
-                        high = param_cfg["high"]
-                        step = param_cfg.get("step")
-                        log = param_cfg.get("log", False)
-                        trial_params[param_name] = trial.suggest_float(param_name, low, high, step=step, log=log)
+    def _restore_vivado_buttons(self) -> None:
+        def restore():
+            self.query_one("#btn-vivado", Button).disabled = False
+            self.query_one("#btn-vivado-stop", Button).disabled = True
+        self.call_from_thread(restore)
 
-                code, score = runner.run_trial(
-                    spec=problem.prompt,
-                    problem_id=problem.id,
-                    params=trial_params,
-                    context_files=dict(problem.context) if problem.context else None,
-                    testbench_files=problem.get_testbench_files() if problem.has_testbench() else None,
-                    enable_rtl_reuse=reuse_rtl,
-                    verbose=False,
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.state == WorkerState.ERROR and event.worker is getattr(self, "vivado_worker", None):
+            self.query_one("#btn-vivado", Button).disabled = False
+            self.query_one("#btn-vivado-stop", Button).disabled = True
+            try:
+                self.query_one("#vivado-status", Label).update(
+                    f"[red]Worker crashed: {event.worker.error}[/red]"
                 )
-                if not score.pass_:
-                    return 1e9
-                val = (score.ppa_metrics or {}).get(objective_metric)
-                if val is None:
-                    if objective_metric == "area":
-                        val = (score.ppa_metrics or {}).get("num_cells")
-                    elif objective_metric == "wires":
-                        val = (score.ppa_metrics or {}).get("num_wires")
-                return float(val) if val is not None else 1e8
+            except Exception:
+                pass
 
-            study.optimize(objective, n_trials=trials_count, callbacks=[optuna_callback])
-        except Exception as e:
-            self.call_from_thread(opt_status.update, f"[red]Optimization error: {e}[/red]")
+    def _build_vivado_project(
+        self,
+        trial_id: str,
+        top_module: str | None,
+        part: str,
+        vivado_log: RichLog,
+    ) -> tuple[str | None, str | None]:
+        """Create project dir, copy RTL+TB, write open_project.tcl.
+
+        Returns (tcl_win_path, proj_dir_win) or (None, None) on failure.
+        """
+        import shutil
+        from src.agents.vivado_ppa import _to_win_path, _is_wsl, _win_temp_base
+        from src.mcp.server import MCPServer
+
+        wsl_mode = _is_wsl()
+
+        out_dir = MCPServer().get_trial_output_dir(trial_id)
+        if not out_dir.exists():
+            vivado_log.write(f"[red]Trial not found: {out_dir}[/red]")
+            return None, None
+
+        found = list(out_dir.rglob("*.sv")) + list(out_dir.rglob("*.v"))
+        tb_found  = [f for f in found if "tb" in f.stem.lower()]
+        rtl_found = [f for f in found if f not in tb_found] or found
+
+        if not found:
+            vivado_log.write(f"[red]No .sv/.v files found under {out_dir}[/red]")
+            return None, None
+
+        if not top_module:
+            top_module = rtl_found[0].stem if rtl_found else tb_found[0].stem
+
+        proj_base_env = os.getenv("VIVADO_PROJECT_DIR")
+        if proj_base_env:
+            proj_base = Path(proj_base_env)
+        elif wsl_mode:
+            proj_base = _win_temp_base()
+        else:
+            import tempfile
+            proj_base = Path(tempfile.gettempdir())
+
+        proj_dir = proj_base / f"verigen_{trial_id[:12]}"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+
+        for f in rtl_found + tb_found:
+            shutil.copy2(f, proj_dir / f.name)
+
+        def win(f: Path) -> str:
+            return _to_win_path(f) if wsl_mode else str(f)
+
+        proj_dir_win = win(proj_dir)
+        rtl_win = [win(proj_dir / f.name) for f in rtl_found]
+        tb_win  = [win(proj_dir / f.name) for f in tb_found]
+
+        rtl_cmds = "\n".join(f"add_files -norecurse {{{s}}}" for s in rtl_win)
+        tb_cmds  = "\n".join(f"add_files -norecurse -fileset sim_1 {{{s}}}" for s in tb_win)
+        tcl_content = (
+            f"create_project {trial_id[:12]} {{{proj_dir_win}}} -part {part} -force\n"
+            + (f"{rtl_cmds}\n" if rtl_cmds else "")
+            + (f"{tb_cmds}\n" if tb_cmds else "")
+            + f"set_property top {top_module} [current_fileset]\n"
+            + f"update_compile_order -fileset sources_1\n"
+            + (f"set_property top {tb_found[0].stem} [get_filesets sim_1]\n"
+               f"update_compile_order -fileset sim_1\n" if tb_found else "")
+        )
+        tcl_wsl = proj_dir / "open_project.tcl"
+        tcl_wsl.write_text(tcl_content, encoding="utf-8")
+        tcl_win = _to_win_path(tcl_wsl) if wsl_mode else str(tcl_wsl)
+
+        vivado_log.write(f"Project: {proj_dir_win}")
+        if rtl_found:
+            vivado_log.write(f"RTL:     {[f.name for f in rtl_found]}")
+        if tb_found:
+            vivado_log.write(f"TB:      {[f.name for f in tb_found]}")
+
+        return tcl_win, proj_dir_win
+
+    def _make_vivado_project(self) -> None:
+        vivado_log    = self.query_one("#vivado-log", RichLog)
+        vivado_status = self.query_one("#vivado-status", Label)
+        trial_id   = self.query_one("#vivado-trial-id", Input).value.strip()
+        top_module = self.query_one("#vivado-top",  Input).value.strip() or None
+        part       = self.query_one("#vivado-part", Input).value.strip() or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
+
+        if not trial_id:
+            vivado_status.update("[red]Enter a trial ID.[/red]")
+            vivado_log.write("[red]No trial ID entered.[/red]")
             return
 
-        self.call_from_thread(self.refresh_database_table)
+        vivado_log.clear()
+        tcl_win, proj_dir_win = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+        if tcl_win:
+            vivado_status.update("Project ready.")
+            vivado_log.write(f"[green]TCL:     {tcl_win}[/green]")
+        else:
+            vivado_status.update("[red]Failed to create project.[/red]")
+
+    def _launch_vivado_gui(self) -> None:
+        import subprocess
+        from src.agents.vivado_ppa import find_vivado_wsl, _to_win_path, _is_wsl
+
+        vivado_log    = self.query_one("#vivado-log", RichLog)
+        vivado_status = self.query_one("#vivado-status", Label)
+
+        vbin = os.getenv("VIVADO_BIN") or find_vivado_wsl() or "vivado"
+        if vbin == "vivado":
+            vivado_status.update("[red]Vivado not found.[/red]")
+            vivado_log.write("[red]Set VIVADO_BIN in .env to point to vivado.bat[/red]")
+            return
+
+        wsl_mode = _is_wsl() and vbin.startswith("/mnt/")
+        trial_id   = self.query_one("#vivado-trial-id", Input).value.strip()
+        top_module = self.query_one("#vivado-top",  Input).value.strip() or None
+        part       = self.query_one("#vivado-part", Input).value.strip() or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
+
+        tcl_path: str | None = None
+        if trial_id:
+            vivado_log.clear()
+            tcl_path, _ = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+
+        if wsl_mode:
+            win_bat = _to_win_path(vbin)
+            if tcl_path:
+                cmd = ["cmd.exe", "/c", "start", '""', win_bat,
+                       "-mode", "gui", "-source", tcl_path, "-nojournal", "-nolog"]
+            else:
+                cmd = ["cmd.exe", "/c", "start", '""', win_bat]
+        else:
+            cmd = [vbin, "-mode", "gui", "-source", tcl_path, "-nojournal", "-nolog"] if tcl_path else [vbin]
+
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            if tcl_path:
+                vivado_status.update(f"Vivado GUI: opening project for {trial_id}")
+                vivado_log.write("[green]Vivado GUI launched.[/green]")
+            else:
+                vivado_status.update("Vivado GUI launched.")
+                vivado_log.write(f"Launched: {vbin}")
+        except Exception as e:
+            vivado_status.update("[red]Failed to launch GUI.[/red]")
+            vivado_log.write(f"[red]Error: {e}[/red]")
+
+    _PANEL_IDS = ["panel-logs", "panel-sim", "panel-code", "panel-todo"]
+
+    def _switch_panel(self, panel_id: str) -> None:
+        self.query_one("#panel-switcher", ContentSwitcher).current = panel_id
+        for pid in self._PANEL_IDS:
+            btn_id = f"btn-{pid}"
+            try:
+                btn = self.query_one(f"#{btn_id}", Button)
+                if pid == panel_id:
+                    btn.add_class("panel-tab-active")
+                else:
+                    btn.remove_class("panel-tab-active")
+            except Exception:
+                pass
+
+    def _refresh_todo_panel(self, trial_id: str) -> None:
+        from src.mcp.server import MCPServer
+        todo_log = self.query_one("#todo-log", RichLog)
+        todo_log.clear()
+        try:
+            todos = MCPServer().read_todos(trial_id)
+        except Exception:
+            return
+        if not todos:
+            todo_log.write("[dim]No TODOs yet.[/dim]")
+            return
+        STATUS_COLOR = {
+            "done": "green", "active": "yellow",
+            "failed": "red", "pending": "white",
+        }
+        todo_log.write(f"[bold]Trial {trial_id} — {len(todos)} item(s)[/bold]\n")
+        for t in todos:
+            status = t.get("status", "pending")
+            color = STATUS_COLOR.get(status, "white")
+            tid = t.get("id", "?")
+            loc = t.get("location", {})
+            line_info = f" line {loc.get('line_start', '?')}" if loc.get("line_start") else ""
+            todo_log.write(
+                f"[{color}][{status.upper():7}][/{color}] "
+                f"[bold]{tid}[/bold]{line_info}"
+            )
+            if t.get("bug"):
+                todo_log.write(f"  [dim]BUG:[/dim]  {t['bug']}")
+            if t.get("fix"):
+                todo_log.write(f"  [dim]FIX:[/dim]  {t['fix']}")
+            todo_log.write("")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         button_id = event.button.id
+        if button_id == "btn-docker-retry":
+            self.check_docker_worker = self._check_and_start_docker()
+            return
+        for pid in self._PANEL_IDS:
+            if button_id == f"btn-{pid}":
+                self._switch_panel(pid)
+                return
+        if button_id == "btn-kill-sim":
+            if hasattr(self, "current_cancel_token") and self.current_cancel_token:
+                self.current_cancel_token.kill_processes()
+            return
         if button_id == "btn-run":
             self.query_one("#btn-run", Button).disabled = True
             self.query_one("#btn-stop", Button).disabled = False
             self.generator_worker = self.run_generation_task()
         elif button_id == "btn-stop":
+            if hasattr(self, "current_cancel_token") and self.current_cancel_token:
+                self.current_cancel_token.cancel()
             if hasattr(self, "generator_worker"):
                 self.generator_worker.cancel()
             if hasattr(self, "current_backend") and self.current_backend:
                 self.current_backend.abort()
-            self.query_one("#run-status", Label).update("Pipeline cancelled by user.")
             self.query_one("#btn-run", Button).disabled = False
             self.query_one("#btn-stop", Button).disabled = True
-            for step in ["plan", "gen", "syntax", "sim", "ppa", "db"]:
+            for step in ["gen", "todo", "syntax", "sim", "db"]:
                 self.set_step_status(step, "inactive")
-        elif button_id == "btn-optimize":
-            self.run_optimization_task()
+        elif button_id == "btn-copy-logs":
+            log_text = "\n".join(getattr(self, "run_log_buffer", []))
+            self.copy_to_clipboard(log_text)
+            self.query_one("#run-log", RichLog).write(
+                "Copied pipeline logs to clipboard." if log_text else "No pipeline logs to copy."
+            )
+        elif button_id == "btn-copy-sim-log":
+            sim_text = "\n".join(getattr(self, "sim_log_buffer", []))
+            self.copy_to_clipboard(sim_text)
+            self.query_one("#run-log", RichLog).write(
+                "Copied SIM log to clipboard." if sim_text else "No SIM log to copy."
+            )
+        elif button_id == "btn-to-vivado":
+            self.query_one(TabbedContent).active = "tab-vivado"
+        elif button_id == "btn-vivado":
+            trial_id = self.query_one("#vivado-trial-id", Input).value.strip()
+            top_module = self.query_one("#vivado-top", Input).value.strip() or None
+            part = self.query_one("#vivado-part", Input).value.strip() or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
+            vivado_status = self.query_one("#vivado-status", Label)
+            vivado_log = self.query_one("#vivado-log", RichLog)
+            self.query_one("#btn-vivado", Button).disabled = True
+            self.query_one("#btn-vivado-stop", Button).disabled = False
+            self.vivado_worker = self.run_vivado_task(trial_id, top_module, part, vivado_status, vivado_log)
+        elif button_id == "btn-vivado-stop":
+            if hasattr(self, "vivado_worker"):
+                self.vivado_worker.cancel()
+            self.query_one("#vivado-status", Label).update("Vivado stopped.")
+            self.query_one("#btn-vivado", Button).disabled = False
+            self.query_one("#btn-vivado-stop", Button).disabled = True
+        elif button_id == "btn-vivado-mkproj":
+            self._make_vivado_project()
+        elif button_id == "btn-vivado-gui":
+            self._launch_vivado_gui()
         elif button_id == "btn-db-refresh":
             self.refresh_database_table()
+        elif button_id == "btn-db-clear":
+            mcp = MCPServer()
+            count = mcp.clear_all_trials()
+            self.refresh_database_table()
+            self.query_one("#db-code", RichLog).clear()
+            self.query_one("#db-search", Input).value = ""
+            self.query_one("#db-code", RichLog).write(
+                f"Cleared {count} trial record(s)." if count else "Database already empty."
+            )
+        elif button_id == "btn-db-to-vivado":
+            trial_id = getattr(self, "_selected_db_trial_id", "")
+            if trial_id:
+                self.query_one(TabbedContent).active = "tab-vivado"
+                def fill_id():
+                    try:
+                        self.query_one("#vivado-trial-id", Input).value = trial_id
+                    except Exception:
+                        pass
+                self.set_timer(0.1, fill_id)
+            else:
+                self.query_one("#db-code", RichLog).write("[yellow]Select a trial row first.[/yellow]")
 
 
 if __name__ == "__main__":

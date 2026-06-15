@@ -33,7 +33,7 @@ docker run --rm nvidia/cvdp-sim:v1.0.0 verilator --version
 ### 3. Download CVDP Dataset
 
 ```bash
-python -m src.cvdp.loader --download --subset nonagentic_no_commercial
+python -m src.cli download --subset nonagentic_no_commercial
 ```
 
 ### 4. Initialize MCP Database
@@ -93,7 +93,7 @@ This will:
 
 ```bash
 python -m src.cli run \
-  --problem-id cvdp_nonagentic_fixed_arbiter_0001 \
+  --spec cvdp:cvdp_nonagentic_fixed_arbiter_0001 \
   --params '{"num_requestors": 4}' \
   --verbose
 ```
@@ -115,8 +115,7 @@ python -m src.cli benchmark \
 python -m src.cli optimize \
   --problem-id cvdp_nonagentic_pipeline_mult_0001 \
   --trials 50 \
-  --objective area_and_delay \
-  --output results/optuna/
+  --objective area
 ```
 
 ## Testing

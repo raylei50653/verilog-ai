@@ -74,6 +74,8 @@ class CVDPProblem:
                 tb[fname] = content
             elif fname == "src/test_runner.py":
                 tb[fname] = content
+            elif fname.endswith(".env") or ".env" in fname:
+                tb[fname] = content
         return tb
 
     def has_testbench(self) -> bool:
