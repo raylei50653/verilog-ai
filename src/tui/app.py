@@ -957,6 +957,7 @@ class VeriGenTUI(App):
                     system_prompt = (
                         "You are a skilled digital design engineer specializing in SystemVerilog testbenches.\n"
                         "Your task is to write a self-checking SystemVerilog testbench for the provided design.\n"
+                        "CRITICAL: SystemVerilog does NOT support mixing binary and hex in a single literal (e.g. 66'b01_A5A5... is ILLEGAL). Use concatenation for headers and data, for example: {2'b01, 64'hA5A5A5A5A5A5A5A5}.\n"
                         "Generate only valid SystemVerilog code, wrapped in a markdown block starting with ```systemverilog and ending with ```.\n"
                         "Include no conversational text outside the code block."
                     )
@@ -967,7 +968,8 @@ class VeriGenTUI(App):
                         f"```systemverilog\n{generated_code}\n```\n\n"
                         f"Please write a self-checking SystemVerilog testbench module named `tb` that instantiates this design, "
                         f"drives the inputs (including generating a clock and a reset), and performs basic sanity checks or simulation stimulus.\n"
-                        f"Ensure the testbench ends with `$finish;` so it terminates. Output the SystemVerilog code inside a ```systemverilog code block."
+                        f"Ensure the testbench ends with `$finish;` so it terminates. Output the SystemVerilog code inside a ```systemverilog code block.\n"
+                        f"Remember: Do not use invalid mixed-base literals. Use concatenation like {{2'b01, 64'hA5A5A5A5A5A5A5A5}} when mixing different base signals."
                     )
                     response = backend.generate(
                         system_prompt=system_prompt,
