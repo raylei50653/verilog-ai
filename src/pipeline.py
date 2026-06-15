@@ -709,6 +709,7 @@ class TrialRunner:
                     on_step_change("ppa", "active")
                 vivado_result = self.vivado_agent.execute(
                     {rtl_filename: code},
+                    testbench_files=testbench_files,
                     config={
                         "top_module": top_module,
                         "cancel_token": cancel_token,

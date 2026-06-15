@@ -47,7 +47,13 @@ Evaluated on the [CVDP benchmark](https://github.com/NVlabs/cvdp_benchmark) (783
 git clone git@github.com:raylei50653/verilog-ai.git && \
 cd verilog-ai && \
 uv venv && uv sync && \
-docker build -f docker/Dockerfile.sim -t nvidia/cvdp-sim:v1.0.0 .
+docker build --network=host -f docker/Dockerfile.sim -t nvidia/cvdp-sim:v1.0.0 .
+```
+
+Launch the GUI:
+
+```bash
+uv run verigen tui
 ```
 
 ### 0. Install system packages
@@ -84,7 +90,7 @@ uv venv && uv sync
 ### 2. Build the Docker simulation image
 
 ```bash
-docker build -f docker/Dockerfile.sim -t nvidia/cvdp-sim:v1.0.0 .
+docker build --network=host -f docker/Dockerfile.sim -t nvidia/cvdp-sim:v1.0.0 .
 
 # Verify tools
 docker run --rm nvidia/cvdp-sim:v1.0.0 iverilog -V
@@ -125,20 +131,20 @@ llama-server \
 ### 5. Download the CVDP benchmark dataset
 
 ```bash
-python -m src.cli download --subset nonagentic_no_commercial
+uv run verigen download --subset nonagentic_no_commercial
 ```
 
 ### 6. Verify installation
 
 ```bash
 # Check dataset info
-python -m src.cli info
+uv run verigen info
 
 # Run a quick single trial
-python -m src.cli run --spec "Implement a 4-bit synchronous counter" --verbose
+uv run verigen run --spec "Implement a 4-bit synchronous counter" --verbose
 
 # Or use a CVDP problem
-python -m src.cli run --spec "cvdp:cvdp_nonagentic_fixed_arbiter_0001" --params '{"num_requestors": 4}' --verbose
+uv run verigen run --spec "cvdp:cvdp_nonagentic_fixed_arbiter_0001" --params '{"num_requestors": 4}' --verbose
 ```
 
 ### 7. (Optional) Install dev dependencies
@@ -151,7 +157,7 @@ pytest tests/ -v
 ### 8. (Optional) Vivado support (WSL2 / native Linux)
 
 ```bash
-python -m src.cli vivado-detect
+uv run verigen vivado-detect
 # Set VIVADO_BIN and VIVADO_PART in .env accordingly
 ```
 
@@ -159,16 +165,16 @@ python -m src.cli vivado-detect
 
 ```bash
 # Run a single trial with Vivado synthesis analysis
-python -m src.cli run --spec "cvdp:cvdp_nonagentic_fixed_arbiter_0001" --vivado -v
+uv run verigen run --spec "cvdp:cvdp_nonagentic_fixed_arbiter_0001" --vivado -v
 
 # Baseline evaluation with pass@k scoring
-python -m src.cli benchmark --dataset nonagentic_no_commercial --samples 10
+uv run verigen benchmark --dataset nonagentic_no_commercial --samples 10
 
 # Standalone Vivado analysis on a trial
-python -m src.cli vivado-analyze --trial-id <trial_id>
+uv run verigen vivado-analyze --trial-id <trial_id>
 
 # Launch TUI
-python -m src.cli tui
+uv run verigen tui
 ```
 
 ## Status

@@ -786,6 +786,8 @@ class VeriGenTUI(App):
             return
 
         rtl_files = {f.name: f.read_text() for f in found}
+        tb_found = [f for f in out_dir.rglob("*") if f.is_file() and f.suffix not in (".sv", ".v")]
+        testbench_files = {f.name: f.read_text() for f in tb_found} if tb_found else None
         if not top_module:
             top_module = found[0].stem
 
@@ -797,7 +799,7 @@ class VeriGenTUI(App):
 
         try:
             agent = VivadoPPAAgent(vivado_bin=vbin, part=part)
-            result = agent.execute(rtl_files=rtl_files, config={"top_module": top_module})
+            result = agent.execute(rtl_files=rtl_files, testbench_files=testbench_files, config={"top_module": top_module})
         except Exception as e:
             status("[red]Vivado error.[/red]")
             log(f"[red]Exception: {e}[/red]")
@@ -872,8 +874,9 @@ class VeriGenTUI(App):
             return None, None
 
         found = list(out_dir.rglob("*.sv")) + list(out_dir.rglob("*.v"))
-        tb_found  = [f for f in found if "tb" in f.stem.lower()]
+        tb_found  = [f for f in found if "tb" in f.stem.lower() or "test" in f.stem.lower()]
         rtl_found = [f for f in found if f not in tb_found] or found
+        extra_files = [f for f in out_dir.rglob("*") if f.is_file() and f.suffix not in (".sv", ".v")]
 
         if not found:
             vivado_log.write(f"[red]No .sv/.v files found under {out_dir}[/red]")
@@ -894,7 +897,7 @@ class VeriGenTUI(App):
         proj_dir = proj_base / f"verigen_{trial_id[:12]}"
         proj_dir.mkdir(parents=True, exist_ok=True)
 
-        for f in rtl_found + tb_found:
+        for f in rtl_found + tb_found + extra_files:
             shutil.copy2(f, proj_dir / f.name)
 
         def win(f: Path) -> str:
@@ -912,7 +915,8 @@ class VeriGenTUI(App):
             + (f"{tb_cmds}\n" if tb_cmds else "")
             + f"set_property top {top_module} [current_fileset]\n"
             + f"update_compile_order -fileset sources_1\n"
-            + (f"set_property top {tb_found[0].stem} [get_filesets sim_1]\n"
+            + (f"current_fileset [get_filesets sim_1]\n"
+               f"set_property top {tb_found[0].stem} [current_fileset]\n"
                f"update_compile_order -fileset sim_1\n" if tb_found else "")
         )
         tcl_wsl = proj_dir / "open_project.tcl"
@@ -943,11 +947,11 @@ class VeriGenTUI(App):
         tcl_win, proj_dir_win = self._build_vivado_project(trial_id, top_module, part, vivado_log)
         if tcl_win:
             vivado_status.update("Project ready.")
-            vivado_log.write(f"[green]TCL:     {tcl_win}[/green]")
+            vivado_log.write(f"[green]Project: {proj_dir_win}[/green]")
         else:
             vivado_status.update("[red]Failed to create project.[/red]")
 
-    def _launch_vivado_gui(self) -> None:
+    def _launch_vivado_with_tcl(self, tcl_win: str | None = None) -> None:
         import subprocess
         from src.agents.vivado_ppa import find_vivado_wsl, _to_win_path, _is_wsl
 
@@ -961,36 +965,35 @@ class VeriGenTUI(App):
             return
 
         wsl_mode = _is_wsl() and vbin.startswith("/mnt/")
+
+        source_args = ["-source", tcl_win, "-nojournal", "-nolog"] if tcl_win else []
+        if wsl_mode:
+            win_bat = _to_win_path(vbin)
+            cmd = ["cmd.exe", "/c", "start", '""', win_bat,
+                   "-mode", "gui"] + source_args
+        else:
+            cmd = [vbin, "-mode", "gui"] + source_args
+
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            vivado_status.update("Vivado GUI launched.")
+            vivado_log.write("[green]Vivado GUI launched with project.[/green]")
+        except Exception as e:
+            vivado_status.update("[red]Failed to launch GUI.[/red]")
+            vivado_log.write(f"[red]Error: {e}[/red]")
+
+    def _launch_vivado_gui(self) -> None:
+        vivado_log    = self.query_one("#vivado-log", RichLog)
         trial_id   = self.query_one("#vivado-trial-id", Input).value.strip()
         top_module = self.query_one("#vivado-top",  Input).value.strip() or None
         part       = self.query_one("#vivado-part", Input).value.strip() or os.getenv("VIVADO_PART", "xc7a35tcpg236-1")
 
-        tcl_path: str | None = None
         if trial_id:
             vivado_log.clear()
-            tcl_path, _ = self._build_vivado_project(trial_id, top_module, part, vivado_log)
-
-        if wsl_mode:
-            win_bat = _to_win_path(vbin)
-            if tcl_path:
-                cmd = ["cmd.exe", "/c", "start", '""', win_bat,
-                       "-mode", "gui", "-source", tcl_path, "-nojournal", "-nolog"]
-            else:
-                cmd = ["cmd.exe", "/c", "start", '""', win_bat]
+            tcl_win, _ = self._build_vivado_project(trial_id, top_module, part, vivado_log)
+            self._launch_vivado_with_tcl(tcl_win)
         else:
-            cmd = [vbin, "-mode", "gui", "-source", tcl_path, "-nojournal", "-nolog"] if tcl_path else [vbin]
-
-        try:
-            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if tcl_path:
-                vivado_status.update(f"Vivado GUI: opening project for {trial_id}")
-                vivado_log.write("[green]Vivado GUI launched.[/green]")
-            else:
-                vivado_status.update("Vivado GUI launched.")
-                vivado_log.write(f"Launched: {vbin}")
-        except Exception as e:
-            vivado_status.update("[red]Failed to launch GUI.[/red]")
-            vivado_log.write(f"[red]Error: {e}[/red]")
+            self._launch_vivado_with_tcl()
 
     _PANEL_IDS = ["panel-logs", "panel-sim", "panel-code", "panel-todo"]
 

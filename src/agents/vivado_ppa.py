@@ -203,6 +203,14 @@ class VivadoPPAAgent(SubAgent):
                 fp.write_text(content, encoding="utf-8")
                 sources.append(str(fp))
 
+            if testbench_files:
+                tb_dir = tmppath / "tb"
+                tb_dir.mkdir(parents=True, exist_ok=True)
+                for name, content in testbench_files.items():
+                    fp = tb_dir / name
+                    fp.parent.mkdir(parents=True, exist_ok=True)
+                    fp.write_text(content, encoding="utf-8")
+
             if wsl_mode:
                 src_paths  = [_to_win_path(s) for s in sources]
                 util_rpt   = _to_win_path(tmppath / "util.rpt")
