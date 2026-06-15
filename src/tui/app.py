@@ -981,8 +981,69 @@ class VeriGenTUI(App):
                     content = response.text
                     code_blocks = re.findall(r"```(?:systemverilog|verilog)?\s*(.*?)\s*```", content, re.DOTALL)
                     tb_code = code_blocks[0].strip() if code_blocks else content.strip()
+
+                    # Self-repair loop using iverilog
+                    has_iverilog = shutil.which("iverilog") is not None
+                    if not has_iverilog:
+                        vivado_log.write("[yellow]iverilog not found, skipping local syntax verification.[/yellow]")
+                    else:
+                        dummy_tb_path = proj_dir / "tb.sv"
+                        for attempt in range(1, 4):
+                            tb_code_clean = tb_code.encode("ascii", errors="ignore").decode("ascii")
+                            dummy_tb_path.write_text(tb_code_clean, encoding="ascii")
+                            
+                            src_files = [str(proj_dir / f.name) for f in rtl_found] + [str(dummy_tb_path)]
+                            
+                            import subprocess
+                            cmd = ["iverilog", "-g2012", "-o", os.devnull] + src_files
+                            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                            
+                            if res.returncode == 0:
+                                vivado_log.write(f"[green]Testbench successfully verified with iverilog (Attempt {attempt}).[/green]")
+                                tb_code = tb_code_clean
+                                break
+                            else:
+                                err_msg = res.stderr.strip()
+                                vivado_log.write(f"[yellow]Testbench verification failed (Attempt {attempt}/3):[/yellow]")
+                                vivado_log.write(f"[dim]{err_msg}[/dim]")
+                                
+                                if attempt < 3:
+                                    vivado_log.write("[dim]AI is repairing the testbench...[/dim]")
+                                    repair_system_prompt = (
+                                        "You are a skilled digital design engineer specializing in SystemVerilog testbenches.\n"
+                                        "Your task is to fix the provided SystemVerilog testbench to resolve compilation errors.\n"
+                                        "CRITICAL: SystemVerilog does NOT support mixing binary and hex in a single literal (e.g. 66'b01_A5A5... is ILLEGAL). Use concatenation for headers and data, for example: {2'b01, 64'hA5A5A5A5A5A5A5A5}.\n"
+                                        "CRITICAL: Do not write invalid time units (e.g. 10 [time units] is a SYNTAX ERROR). Use pure numeric values for delays (e.g. localparam TIME_PER_CYCLE = 10;).\n"
+                                        "Generate only valid SystemVerilog code, wrapped in a markdown block starting with ```systemverilog and ending with ```.\n"
+                                        "Include no conversational text outside the code block."
+                                    )
+                                    repair_user_prompt = (
+                                        f"Here is the specification of the design:\n"
+                                        f"```\n{spec_prompt}\n```\n\n"
+                                        f"Here is the generated Verilog/SystemVerilog RTL code of the design:\n"
+                                        f"```systemverilog\n{generated_code}\n```\n\n"
+                                        f"Here is the CURRENT SystemVerilog testbench that failed compilation:\n"
+                                        f"```systemverilog\n{tb_code}\n```\n\n"
+                                        f"Here is the compilation error message from iverilog:\n"
+                                        f"```\n{err_msg}\n```\n\n"
+                                        f"Please fix the testbench code to resolve these compilation errors.\n"
+                                        f"Make sure to keep the module name as `tb` and verify it has all the correct ports/connections.\n"
+                                        f"Ensure the testbench ends with `$finish;` so it terminates. Output the fixed SystemVerilog code inside a ```systemverilog code block.\n"
+                                        f"Remember: Do not use invalid mixed-base literals (use concatenation). Do not use invalid time unit formats like '[time units]' in localparams (use pure numbers instead)."
+                                    )
+                                    response = backend.generate(
+                                        system_prompt=repair_system_prompt,
+                                        user_prompt=repair_user_prompt,
+                                        temperature=0.2,
+                                        max_tokens=4096,
+                                    )
+                                    content = response.text
+                                    code_blocks = re.findall(r"```(?:systemverilog|verilog)?\s*(.*?)\s*```", content, re.DOTALL)
+                                    tb_code = code_blocks[0].strip() if code_blocks else content.strip()
+                                else:
+                                    vivado_log.write("[yellow]Failed to repair testbench after 3 attempts. Proceeding with the latest generated version anyway.[/yellow]")
                 except Exception as e:
-                    vivado_log.write(f"[yellow]Failed to generate testbench using AI: {e}. Falling back to default template.[/yellow]")
+                    vivado_log.write(f"[yellow]Failed to generate/verify testbench using AI: {e}. Falling back to default template.[/yellow]")
 
             if not tb_code:
                 tb_code = f"""`timescale 1ns / 1ps
@@ -1016,6 +1077,25 @@ endmodule
             dummy_tb_path = proj_dir / "tb.sv"
             dummy_tb_path.write_text(tb_code, encoding="ascii")
             tb_found = [dummy_tb_path]
+
+        # General testbench syntax check with iverilog (for both user-provided and final AI-generated)
+        has_iverilog = shutil.which("iverilog") is not None
+        if has_iverilog and tb_found:
+            src_files = [str(proj_dir / f.name) for f in rtl_found] + [str(proj_dir / f.name) for f in tb_found]
+            # Remove duplicate file paths
+            src_files = list(dict.fromkeys(src_files))
+            
+            import subprocess
+            cmd = ["iverilog", "-g2012", "-o", os.devnull] + src_files
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+                if res.returncode == 0:
+                    vivado_log.write("[green]Testbench syntax verified successfully with iverilog.[/green]")
+                else:
+                    vivado_log.write("[yellow]Warning: Testbench compilation failed under iverilog (Vivado simulation might fail):[/yellow]")
+                    vivado_log.write(f"[dim]{res.stderr.strip()}[/dim]")
+            except Exception as e:
+                vivado_log.write(f"[yellow]Could not run iverilog syntax check: {e}[/yellow]")
 
         vivado_log.write(f"Project: {proj_dir}")
         if rtl_found:
