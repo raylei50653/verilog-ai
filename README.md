@@ -105,10 +105,9 @@ Key environment variables:
 |---|---|---|
 | `LLAMA_SERVER_BASE_URL` | `http://127.0.0.1:8080/v1` | llama-server API endpoint |
 | `DEFAULT_MODEL` | `Qwen3.5-9B-UD-Q4_K_XL` | Model name reported to server |
-| `SIM_IMAGE` | `nvidia/cvdp-sim:v1.0.0` | Docker simulation image |
-| `MAX_RETRIES` | `3` | Max retries per trial |
-| `TEMPERATURE` | `0.2` | LLM temperature |
-| `MAX_TOKENS` | `4096` | Max output tokens |
+| `VIVADO_BIN` | (auto-detect) | Path to vivado binary |
+| `VIVADO_PART` | `xc7a35tcpg236-1` | Xilinx part number |
+| `VIVADO_PROJECT_DIR` | (system temp) | Vivado project output directory |
 
 ### 4. Start the LLM server
 
